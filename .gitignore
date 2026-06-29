@@ -1,0 +1,33 @@
+# Du lieu lon (KHONG day len GitHub: >100MB/file)
+# archive/ = fraudTrain.csv (~350MB) + fraudTest.csv (~150MB) tu Kaggle
+archive/
+data/*.csv
+data/sample/
+
+# Ket qua sinh ra (train lai la co)
+outputs/
+
+# Moi truong ao & cache Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Model / du lieu nhi phan le
+*.pt
+*.pth
+*.ckpt
+
+# IDE / he dieu hanh
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# Van giu huong dan tai du lieu
+!data/README.md

@@ -1,0 +1,8 @@
+torch
+torch_geometric
+pandas
+numpy
+scikit-learn
+matplotlib
+tqdm
+streamlit
