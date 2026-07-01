@@ -89,6 +89,7 @@ def main() -> None:
 
     _init_state(scorer, categories)
 
+    _data_characteristics(scorer)
     _training_progress(scorer)
 
     # ---------------- quick-load example buttons ---------------- #
@@ -121,6 +122,62 @@ def main() -> None:
 
 
 # --------------------------------------------------------------------------- #
+def _data_characteristics(scorer):
+    """Chart the train/test data characteristics saved with the model (EDA)."""
+    prof = getattr(scorer, "data_profile", {}) or {}
+    if not prof:
+        return  # older artifact without a data profile — nothing to show
+
+    with st.expander("📊 Data characteristics (train / test)", expanded=False):
+        cls = prof.get("class", {})
+        tr, te = cls.get("train", {}), cls.get("test", {})
+
+        def _rate(d):
+            n = d.get("genuine", 0) + d.get("fraud", 0)
+            return (100.0 * d.get("fraud", 0) / n) if n else 0.0
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Train rows", f"{tr.get('genuine', 0) + tr.get('fraud', 0):,}",
+                  help="Rows loaded for training (all fraud kept)")
+        c2.metric("Test rows", f"{te.get('genuine', 0) + te.get('fraud', 0):,}")
+        c3.metric("Fraud rate (train / test)", f"{_rate(tr):.2f}% / {_rate(te):.2f}%")
+
+        st.caption("Class balance (genuine vs fraud)")
+        st.bar_chart(pd.DataFrame(
+            {"genuine": [tr.get("genuine", 0), te.get("genuine", 0)],
+             "fraud": [tr.get("fraud", 0), te.get("fraud", 0)]},
+            index=pd.Index(["train", "test"], name="split"),
+        ))
+
+        left, right = st.columns(2)
+        h = prof.get("log_amt_hist", {})
+        if h.get("centers"):
+            with left:
+                st.caption("Amount distribution — log(1+amt), genuine vs fraud")
+                st.bar_chart(pd.DataFrame(
+                    {"genuine": h["genuine"], "fraud": h["fraud"]},
+                    index=pd.Index([round(c, 2) for c in h["centers"]], name="log_amt"),
+                ))
+        hr = prof.get("hour", {})
+        if hr.get("rate"):
+            with right:
+                st.caption("Fraud rate by hour of day")
+                st.bar_chart(pd.DataFrame(
+                    {"fraud rate": hr["rate"]},
+                    index=pd.Index(list(range(24)), name="hour"),
+                ))
+
+        cat = prof.get("category", {})
+        if cat.get("labels"):
+            st.caption("Fraud rate by merchant category (top categories by volume)")
+            st.bar_chart(pd.DataFrame(
+                {"fraud rate": cat["rate"]},
+                index=pd.Index(cat["labels"], name="category"),
+            ))
+        st.caption("Counts reflect the rows loaded for train/eval (fraud always kept); "
+                   "distribution shapes are representative of the full data.")
+
+
 def _training_progress(scorer):
     """Visualise the per-epoch training curves saved with the model."""
     hist = getattr(scorer, "history", {}) or {}
@@ -152,6 +209,38 @@ def _training_progress(scorer):
             f"final train loss = {train_loss[-1]:.4f}"
             if val_auc else f"final train loss = {train_loss[-1]:.4f}"
         )
+        _epoch_index = pd.Index(epochs, name="Epoch")
+
+        # threshold vs. the genuine/fraud error bands it separates (paper Eq. 9)
+        thr = hist.get("thr_mu2sigma") or []
+        gen_mean = hist.get("val_err_genuine_mean") or []
+        fraud_mean = hist.get("val_err_fraud_mean") or []
+        if thr:
+            st.caption("Decision threshold (μ+2σ) vs. genuine/fraud reconstruction error")
+            st.line_chart(pd.DataFrame(
+                {"Threshold μ+2σ": thr, "Genuine mean error": gen_mean,
+                 "Fraud mean error": fraud_mean},
+                index=_epoch_index,
+            ))
+
+        # validation detection metrics at each epoch's μ+2σ threshold
+        val_p = hist.get("val_precision") or []
+        val_r = hist.get("val_recall") or []
+        val_f1 = hist.get("val_f1") or []
+        # per-type reconstruction loss
+        type_loss = {k[len("loss_"):]: hist[k] for k in hist if k.startswith("loss_")}
+        mc, tc = st.columns(2)
+        if val_f1:
+            with mc:
+                st.caption("Validation P / R / F1 @ μ+2σ per epoch")
+                st.line_chart(pd.DataFrame(
+                    {"Precision": val_p, "Recall": val_r, "F1": val_f1},
+                    index=_epoch_index,
+                ))
+        if type_loss:
+            with tc:
+                st.caption("Reconstruction loss per node type")
+                st.line_chart(pd.DataFrame(type_loss, index=_epoch_index))
 
 
 def _init_state(scorer, categories):

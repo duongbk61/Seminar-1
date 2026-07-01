@@ -70,7 +70,7 @@ def run_training(cfg: Config | None = None) -> dict:
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     val_labels = val_info["labels"]
-    history = {"train_loss": [], "val_loss": [], "val_auc_pr": []}
+    history: dict[str, list] = {}
     best_auc, best_state, patience = -1.0, None, 0
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -81,15 +81,14 @@ def run_training(cfg: Config | None = None) -> dict:
         opt.step()
 
         val_scores = model.transaction_scores(val_data, device).numpy()
-        gen = val_labels == 0
-        try:
-            from sklearn.metrics import average_precision_score
-            val_auc = float(average_precision_score(val_labels, val_scores))
-        except Exception:
-            val_auc = float("nan")
-        history["train_loss"].append(float(loss.item()))
-        history["val_loss"].append(float(val_scores[gen].mean()))
-        history["val_auc_pr"].append(val_auc)
+        # per-epoch diagnostics (threshold, genuine/fraud error gap, val metrics,
+        # per-type loss) so the training process can be visualized after the fact
+        diag = evaluate.epoch_diagnostics(val_scores, val_labels, parts)
+        diag["train_loss"] = float(loss.item())
+        diag["val_loss"] = diag["val_err_genuine_mean"]   # kept for backward-compat
+        for k, v in diag.items():
+            history.setdefault(k, []).append(v)
+        val_auc = diag["val_auc_pr"]
 
         if val_auc > best_auc + 1e-4:
             best_auc = val_auc
@@ -127,6 +126,7 @@ def run_training(cfg: Config | None = None) -> dict:
 
     ref_store = data_prep.compute_reference_store(train_gen, feats)
     demo_aux = data_prep.build_demo_aux(train_raw, test_raw, seed=cfg.seed)
+    data_profile = data_prep.compute_data_profile(train_raw, test_raw)
 
     model_kwargs = dict(metadata=metadata, in_dims=in_dims, type_targets=type_targets,
                         hidden_dim=cfg.hidden_dim, heads=cfg.heads,
@@ -145,9 +145,15 @@ def run_training(cfg: Config | None = None) -> dict:
         "metrics_f1": metrics_f1,
         "feature_names": {t: feats[t].feature_names for t in feats},
         "history": history,          # per-epoch train/val curves for the demo
+        "data_profile": data_profile,  # EDA summary (class balance, amount/hour/category) for the demo
     }
     out_path = cfg.output_dir / ARTIFACT_PATH_NAME
     torch.save(artifact, out_path)
+    if history:
+        hist_df = pd.DataFrame(history)
+        hist_df.index = np.arange(1, len(hist_df) + 1)
+        hist_df.to_csv(cfg.output_dir / "history.csv", index_label="epoch")
+        print(f"[save] per-epoch history -> {cfg.output_dir / 'history.csv'}")
     with open(cfg.output_dir / "metrics.json", "w") as f:
         json.dump({"test_mu2sigma": metrics, "test_f1sweep": metrics_f1,
                    "threshold_mu2sigma": threshold_mu2sigma, "threshold_f1": threshold_f1,

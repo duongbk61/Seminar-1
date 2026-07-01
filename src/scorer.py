@@ -21,7 +21,7 @@ from .model import HeteroGraphAutoEncoder
 class FraudScorer:
     def __init__(self, model, feats, reference_store, threshold, feature_names,
                  metrics, device="cpu", demo_aux=None,
-                 metrics_f1=None, threshold_f1=None, history=None):
+                 metrics_f1=None, threshold_f1=None, history=None, data_profile=None):
         self.model = model
         self.feats = feats                      # dict type -> TypeFeaturizer
         self.ref = reference_store
@@ -33,6 +33,7 @@ class FraudScorer:
         self.device = device
         self.demo_aux = demo_aux or {}
         self.history = history or {}            # per-epoch training curves (may be empty for old artifacts)
+        self.data_profile = data_profile or {}  # EDA summary of train/test data (may be empty for old artifacts)
         self.txn_cont_names = feats["transaction"].cont_cols
         self.model.eval()
 
@@ -48,7 +49,7 @@ class FraudScorer:
                    art["feature_names"], art.get("metrics", {}), device,
                    demo_aux=art.get("demo_aux", {}),
                    metrics_f1=art.get("metrics_f1", {}), threshold_f1=art.get("threshold_f1"),
-                   history=art.get("history"))
+                   history=art.get("history"), data_profile=art.get("data_profile"))
 
     def known_customers(self, limit=None):
         ids = list(self.ref.get("customer", {}).keys())

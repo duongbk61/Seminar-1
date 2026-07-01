@@ -336,6 +336,51 @@ def compute_reference_store(df_genuine: pd.DataFrame, feats: dict) -> dict:
     return out
 
 
+def compute_data_profile(train_df: pd.DataFrame, test_df: pd.DataFrame,
+                         n_top_cat: int = 12, n_bins: int = 40) -> dict:
+    """Compact EDA summary saved with the model so the demo can chart the data
+    characteristics without re-reading the raw CSVs. All values are small lists.
+
+    NOTE: counts reflect the rows actually loaded for train/eval (fraud is always
+    kept, so the training class balance is intentionally inflated vs. the full
+    file). Distribution *shapes* are still representative.
+    """
+    def _counts(df):
+        f = int((df["is_fraud"] == 1).sum())
+        return {"genuine": int(len(df) - f), "fraud": f}
+
+    prof = {"class": {"train": _counts(train_df), "test": _counts(test_df)}}
+
+    # transaction-amount (log1p) histogram, genuine vs fraud, on the train rows
+    amt = np.log1p(pd.to_numeric(train_df["amt"], errors="coerce").fillna(0.0).clip(lower=0)).to_numpy()
+    y = train_df["is_fraud"].to_numpy()
+    hi = float(np.percentile(amt, 99.5)) if amt.size else 1.0
+    lo = float(amt.min()) if amt.size else 0.0
+    bins = np.linspace(lo, hi if hi > lo else lo + 1.0, n_bins + 1)
+    g, _ = np.histogram(amt[y == 0], bins=bins)
+    fr, _ = np.histogram(amt[y == 1], bins=bins)
+    centers = (bins[:-1] + bins[1:]) / 2
+    prof["log_amt_hist"] = {"centers": [float(x) for x in centers],
+                            "genuine": [int(x) for x in g], "fraud": [int(x) for x in fr]}
+
+    # fraud rate + volume by hour of day (train)
+    hour = pd.to_datetime(train_df["trans_date_trans_time"], errors="coerce").dt.hour.fillna(12).astype(int)
+    byh = (pd.DataFrame({"hour": hour, "is_fraud": y})
+           .groupby("hour")["is_fraud"].agg(["mean", "size"]).reindex(range(24), fill_value=0))
+    prof["hour"] = {"rate": [float(x) for x in byh["mean"]],
+                    "count": [int(x) for x in byh["size"]]}
+
+    # fraud rate by merchant category (top categories by volume, train)
+    cat = train_df["category"].astype(str)
+    dfc = pd.DataFrame({"cat": cat, "is_fraud": y})
+    top = dfc["cat"].value_counts().head(n_top_cat).index.tolist()
+    grp = dfc[dfc["cat"].isin(top)].groupby("cat")["is_fraud"].agg(["mean", "size"]).reindex(top)
+    prof["category"] = {"labels": [str(c) for c in top],
+                        "rate": [float(x) for x in grp["mean"]],
+                        "count": [int(x) for x in grp["size"]]}
+    return prof
+
+
 HETERO_METADATA = (
     ["customer", "merchant", "transaction"],
     [
