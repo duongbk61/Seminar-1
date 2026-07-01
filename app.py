@@ -67,7 +67,7 @@ def main() -> None:
     aux = scorer.demo_aux
     cust_attrs = aux.get("customer_attrs", {})
     merch_attrs = aux.get("merchant_attrs", {})
-    categories = aux.get("categories", []) or sorted(scorer.feat.cat_vocab)
+    categories = aux.get("categories", []) or sorted(scorer.feats["merchant"].cat_vocab.get("category", []))
     known_customers = list(cust_attrs.keys())
     known_merchants = list(merch_attrs.keys())
 

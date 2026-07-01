@@ -27,15 +27,16 @@ retraining**.
 
 | File | Role |
 |------|------|
-| `src/config.py` | All hyperparameters (paper Table 4) + documented deviations |
-| `src/data_prep.py` | Feature engineering + hetero-graph construction (`Featurizer`, `build_hetero_data`) |
-| `src/model.py` | `HeteroGraphAutoEncoder`: HGT encoder → VAE latent → MLP decoder; `ae_loss` |
+| `src/config.py` | All hyperparameters (paper Table 3) + documented deviations |
+| `src/data_prep.py` | Feature engineering + hetero-graph construction (`make_featurizers`/`TypeFeaturizer` per-type featurizers + `build_hetero_data`) |
+| `src/hgae_conv.py` | Custom intra-edge attention layer (paper Eq. 1-5) |
+| `src/model.py` | `HeteroGraphAutoEncoder`: HGAEConv encoder → VAE latent → MLP decoder; `ae_loss` |
 | `src/train.py` | Train pipeline, threshold selection, metrics, artifact saving |
 | `src/evaluate.py` | F1 threshold sweep, metrics, Figure-5 plots |
 | `src/scorer.py` | `FraudScorer`: real-time single-transaction scoring + cold-start |
 
 Graph: 3 node types `customer` ↔ `transaction` ↔ `merchant` (bidirectional edges).
-Encoder uses PyG `HGTConv` (Heterogeneous Graph Transformer, Hu et al. 2020).
+Encoder uses the custom `HGAEConv` in `src/hgae_conv.py` implementing the paper's intra-edge attention (Eq. 1-5); PyG's HGT (Hu et al. 2020) is the conceptual ancestor but is NOT used directly.
 
 ## Project-specific conventions
 
