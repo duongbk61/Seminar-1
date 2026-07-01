@@ -92,6 +92,8 @@ def main() -> None:
 
     _init_state(scorer, categories)
 
+    _training_progress(scorer)
+
     # ---------------- quick-load example buttons ---------------- #
     st.subheader("1 · Pick a transaction")
     c1, c2, c3, c4 = st.columns(4)
@@ -122,6 +124,39 @@ def main() -> None:
 
 
 # --------------------------------------------------------------------------- #
+def _training_progress(scorer):
+    """Visualise the per-epoch training curves saved with the model."""
+    hist = getattr(scorer, "history", {}) or {}
+    train_loss = hist.get("train_loss") or []
+    val_loss = hist.get("val_loss") or []
+    val_auc = hist.get("val_auc_pr") or []
+    if not train_loss:
+        return  # older artifact without history — nothing to show
+
+    with st.expander(f"📈 Training progress ({len(train_loss)} epochs)", expanded=False):
+        epochs = list(range(1, len(train_loss) + 1))
+        loss_df = pd.DataFrame(
+            {"Train loss": train_loss, "Val recon error (genuine)": val_loss},
+            index=pd.Index(epochs, name="Epoch"),
+        )
+        auc_df = pd.DataFrame(
+            {"Val AUC-PR": val_auc}, index=pd.Index(epochs, name="Epoch")
+        )
+        lc, rc = st.columns(2)
+        with lc:
+            st.caption("Loss per epoch")
+            st.line_chart(loss_df)
+        with rc:
+            st.caption("Validation AUC-PR per epoch")
+            st.line_chart(auc_df)
+        best_ep = int(max(range(len(val_auc)), key=lambda i: val_auc[i]) + 1) if val_auc else len(epochs)
+        st.caption(
+            f"Best val AUC-PR = {max(val_auc):.4f} at epoch {best_ep} · "
+            f"final train loss = {train_loss[-1]:.4f}"
+            if val_auc else f"final train loss = {train_loss[-1]:.4f}"
+        )
+
+
 def _init_state(scorer, categories):
     ss = st.session_state
     ss.setdefault("cust_choice", "➕ New customer")

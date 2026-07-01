@@ -144,6 +144,7 @@ def run_training(cfg: Config | None = None) -> dict:
         "metrics": metrics,
         "metrics_f1": metrics_f1,
         "feature_names": {t: feats[t].feature_names for t in feats},
+        "history": history,          # per-epoch train/val curves for the demo
         "is_sample_data": is_sample,
     }
     out_path = cfg.output_dir / ARTIFACT_PATH_NAME

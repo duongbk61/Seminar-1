@@ -85,7 +85,8 @@ streamlit run app.py            # open the interactive demo in the browser
 In the demo you can load a random genuine/fraud example, pick a known
 customer/merchant or invent brand-new ones (cold-start), tweak the amount / hour /
 category, and watch the reconstruction error cross the fraud threshold — with a
-per-feature breakdown of *why*.
+per-feature breakdown of *why*. A **📈 Training progress** panel plots the
+per-epoch loss and validation AUC-PR curves saved with the model.
 
 ## How to train
 
