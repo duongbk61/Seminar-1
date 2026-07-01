@@ -1,16 +1,17 @@
 """Central configuration for the Heterogeneous Graph Auto-Encoder fraud detector.
 
-The hyper-parameters follow Table 4 of the paper
-"Heterogeneous Graph Auto-Encoder for Credit Card Fraud Detection"
-(Singh et al., arXiv:2410.08121) where they are sensible.
+Hyper-parameters follow the paper's **Table 3** ("Values for different parameters
+used in the model") of "Heterogeneous Graph Auto-Encoder for Credit Card Fraud
+Detection" (Majumder et al., IJCA 32(2) 2025). (Table 4 is the results table.)
 
-Two values reported in Table 4 are almost certainly typos and are NOT used
-verbatim:
-  * "Number of Layers for the Encoder (l) = 124"  -> 124 message-passing layers
-    would over-smooth a GNN catastrophically. We expose `encoder_layers`
-    (default 2) instead.
-  * "Number of Layers for the Decoder = 64" -> interpreted as the decoder
-    hidden width (`decoder_hidden = 64`).
+This is the FAITHFUL implementation. Only two values are not used verbatim,
+because the paper is unrunnable as written:
+  * "Number of Layers for the Encoder (l) = 124" -> `encoder_layers = 2`.
+    124 message-passing layers oversmooth catastrophically (embeddings collapse).
+  * The literal reparameterization `mean(h) + eps*exp(0.5*log(h))` takes log() of
+    raw activations (NaN); the model uses standard mu/logvar heads instead.
+Everything else matches the paper: 16 heads, dropout 0.4, regularization 0.01,
+NO KL term, NO latent bottleneck (latent = hidden).
 """
 from __future__ import annotations
 
@@ -38,25 +39,20 @@ class Config:
     # set to keep the natural class imbalance (faithful metrics, like the paper).
     test_subsample: int | None = None
 
-    # ----- model (Table 4) -----
+    # ----- model (paper Table 3) -----
     hidden_dim: int = 64          # "Size of Hidden Layers" = 64
-    heads: int = 8                # paper says 16; 8 is faster/stabler on CPU (hidden % heads == 0)
-    encoder_layers: int = 2       # paper's "124" is implausible; 2 HGT layers
-    decoder_hidden: int = 64      # paper's "Decoder = 64"
-    # For reconstruction-based anomaly detection the latent MUST be a bottleneck
-    # (latent_dim < n_features ~= 23) so the AE cannot learn the identity map and
-    # genuine vs. fraud reconstruction error separates. Paper's 0.4 dropout caused
-    # severe under-fitting here, so we use a light value (genuine must reconstruct
-    # well for the anomaly signal to emerge).
-    latent_dim: int = 12
-    dropout: float = 0.1
+    heads: int = 16               # "Number of heads (H)" = 16
+    encoder_layers: int = 2       # FORCED DEVIATION: Table 3 says 124 -> oversmooths
+    decoder_hidden: int = 64      # "Number of Layers for the Decoder" = 64 (width)
+    latent_dim: int = 64          # = hidden_dim; the paper has NO bottleneck
+    dropout: float = 0.4          # "Dropout Rate" = 0.4
 
     # ----- optimisation -----
     lr: float = 2e-3
-    weight_decay: float = 1e-5    # paper's 0.01 over-regularised; AE needs to fit genuine
+    weight_decay: float = 0.01    # "Regularization Rate" = 0.01
     epochs: int = 150
-    beta: float = 5e-4            # KL weight in the VAE objective (kept small -> near-AE)
-    val_fraction: float = 0.15    # genuine rows held out from training for thresholding
+    beta: float = 0.0             # the paper has NO KL term (reconstruction-only)
+    val_fraction: float = 0.15
     early_stop_patience: int = 25
 
     seed: int = 42
