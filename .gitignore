@@ -2,7 +2,6 @@
 # archive/ = fraudTrain.csv (~350MB) + fraudTest.csv (~150MB) tu Kaggle
 archive/
 data/*.csv
-data/sample/
 
 # Ket qua sinh ra (train lai la co)
 outputs/
@@ -21,6 +20,9 @@ __pycache__/
 *.pt
 *.pth
 *.ckpt
+
+# Bao cao LaTeX (giu rieng / Overleaf)
+Seminar_1/
 
 # IDE / he dieu hanh
 .vscode/

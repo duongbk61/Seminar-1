@@ -38,8 +38,8 @@ def run_training(cfg: Config | None = None) -> dict:
     set_seed(cfg.seed)
     device = pick_device(cfg.device)
 
-    train_path, test_path, is_sample = data_prep.resolve_data_paths(cfg)
-    print(f"[data] train={train_path.name} test={test_path.name} (synthetic={is_sample})")
+    train_path, test_path = data_prep.resolve_data_paths(cfg)
+    print(f"[data] train={train_path.name} test={test_path.name}")
     train_raw = data_prep.load_raw(train_path, cfg.train_subsample, cfg.keep_all_fraud, cfg.seed)
     test_raw = data_prep.load_raw(test_path, cfg.test_subsample, cfg.keep_all_fraud, cfg.seed)
     print(f"[data] train rows={len(train_raw)} fraud={int(train_raw.is_fraud.sum())} | "
@@ -145,13 +145,12 @@ def run_training(cfg: Config | None = None) -> dict:
         "metrics_f1": metrics_f1,
         "feature_names": {t: feats[t].feature_names for t in feats},
         "history": history,          # per-epoch train/val curves for the demo
-        "is_sample_data": is_sample,
     }
     out_path = cfg.output_dir / ARTIFACT_PATH_NAME
     torch.save(artifact, out_path)
     with open(cfg.output_dir / "metrics.json", "w") as f:
         json.dump({"test_mu2sigma": metrics, "test_f1sweep": metrics_f1,
                    "threshold_mu2sigma": threshold_mu2sigma, "threshold_f1": threshold_f1,
-                   "best_val_auc_pr": best_auc, "is_sample_data": is_sample}, f, indent=2)
+                   "best_val_auc_pr": best_auc}, f, indent=2)
     print(f"[save] artifacts -> {out_path}")
     return {"metrics": metrics, "threshold": threshold_mu2sigma, "artifact_path": str(out_path)}

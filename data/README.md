@@ -16,22 +16,17 @@ data/
   fraudTest.csv      (~0.55M rows, ~2.1k fraud)
 ```
 
-That's it — the code auto-detects them. By default we subsample
-(~120k train / ~40k test, all fraud kept) so training is fast on CPU/GTX 1650.
-Change `train_subsample` / `test_subsample` in `src/config.py` (set to `None`
-for the full dataset).
+That's it — the code auto-detects them (it also checks an `archive/` folder).
+Choose how many rows to draw from these real files at run time with
+`python main.py --train-size N --test-size N` (all fraud rows are always kept);
+omit `--test-size` for the full test set, or pass `--full` to use everything. The
+defaults live in `src/config.py` (`train_subsample` / `test_subsample`).
 
 ## Don't have the files yet?
 
-You can build and run the **entire** pipeline + demo on synthetic data that has
-the identical schema:
-
-```bash
-python make_sample_data.py          # writes data/sample/fraudTrain.csv & fraudTest.csv
-```
-
-When the real `data/fraudTrain.csv` / `data/fraudTest.csv` appear, they take
-priority automatically over the synthetic ones.
+The dataset is **required** — there is no synthetic fallback. Training aborts with
+a clear error until `fraudTrain.csv` and `fraudTest.csv` are present in `data/`
+(or `archive/`). Download them from the Kaggle page linked above.
 
 ## Expected columns
 

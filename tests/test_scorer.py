@@ -48,7 +48,6 @@ def _artifact(tmp_path):
         "demo_aux": {}, "threshold_mu2sigma": 0.5, "threshold_f1": 0.5,
         "metrics": {}, "metrics_f1": {},
         "feature_names": {t: feats[t].feature_names for t in feats},
-        "is_sample_data": True,
     }
     p = tmp_path / "artifacts.pt"
     torch.save(art, p)

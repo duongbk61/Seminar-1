@@ -86,9 +86,6 @@ def main() -> None:
             st.caption(f"(F1-sweep F1 = {scorer.metrics_f1.get('f1', float('nan')):.3f})")
         st.caption(f"Decision threshold = `{scorer.threshold:.6f}`")
         st.caption(f"Known customers: {len(known_customers)} · merchants: {len(known_merchants)}")
-        if scorer.is_sample:
-            st.warning("Model trained on **synthetic sample data**. Put the real "
-                       "Kaggle CSVs in `data/` or `archive/` and rerun `python main.py`.")
 
     _init_state(scorer, categories)
 

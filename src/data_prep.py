@@ -19,7 +19,6 @@ with bidirectional edges  customer <-> transaction <-> merchant.
 """
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,30 +43,21 @@ TXN_CAT: list[str] = []
 # --------------------------------------------------------------------------- #
 # path resolution + loading
 # --------------------------------------------------------------------------- #
-def resolve_data_paths(cfg) -> tuple[Path, Path, bool]:
-    """Prefer the real Kaggle files (data/ or archive/); fall back to synthetic."""
+def resolve_data_paths(cfg) -> tuple[Path, Path]:
+    """Locate the real Kaggle files (data/ or archive/). Raises if not found."""
     project_root = cfg.train_csv.parent.parent
-    real_candidates = [
+    candidates = [
         (cfg.train_csv, cfg.test_csv),
         (project_root / "archive" / "fraudTrain.csv", project_root / "archive" / "fraudTest.csv"),
         (cfg.train_csv.parent / "archive" / "fraudTrain.csv",
          cfg.train_csv.parent / "archive" / "fraudTest.csv"),
     ]
-    for train_p, test_p in real_candidates:
+    for train_p, test_p in candidates:
         if train_p.exists() and test_p.exists():
-            return train_p, test_p, False
-
-    sample_train = cfg.train_csv.parent / "sample" / "fraudTrain.csv"
-    sample_test = cfg.test_csv.parent / "sample" / "fraudTest.csv"
-    if sample_train.exists() and sample_test.exists():
-        warnings.warn(
-            "Real fraudTrain.csv & fraudTest.csv not found (looked in data/ and "
-            "archive/) - using synthetic sample data in data/sample/."
-        )
-        return sample_train, sample_test, True
+            return train_p, test_p
     raise FileNotFoundError(
-        "No dataset found. Put fraudTrain.csv & fraudTest.csv in data/ or archive/, "
-        "or run `python make_sample_data.py` to create synthetic sample data."
+        "No dataset found. Download the Kaggle 'kartik2112/fraud-detection' dataset "
+        "and place fraudTrain.csv & fraudTest.csv in data/ or archive/."
     )
 
 

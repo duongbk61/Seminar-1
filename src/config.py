@@ -29,14 +29,15 @@ class Config:
     train_csv: Path = DATA_DIR / "fraudTrain.csv"
     test_csv: Path = DATA_DIR / "fraudTest.csv"
 
-    # ----- subsampling (CPU-friendly, keeps class imbalance) -----
-    # Transactions kept from the TRAIN file (CPU-friendly). The auto-encoder only
-    # learns from genuine rows, so we keep every fraud row (they go to validation
-    # for threshold selection) plus a large genuine pool. Set None for the full file.
+    # ----- how many rows to draw from the REAL dataset (override via main.py) -----
+    # Rows kept from the TRAIN file (CPU-friendly). The auto-encoder only learns
+    # from genuine rows, so we keep every fraud row (they go to validation for
+    # threshold selection) plus a genuine pool. None = the full file. CLI: --train-size.
     train_subsample: int | None = 120_000
     keep_all_fraud: bool = True
     # TEST is scored in a single cheap forward pass, so evaluate on the FULL test
     # set to keep the natural class imbalance (faithful metrics, like the paper).
+    # None = the full file. CLI: --test-size.
     test_subsample: int | None = None
 
     # ----- model (paper Table 3) -----

@@ -10,13 +10,12 @@ imbalance without resampling. Master's seminar project (HUST SoICT, Group 06).
 
 ```bash
 pip install -r requirements.txt
-python make_sample_data.py      # synthetic Sparkov-schema data (no Kaggle needed)
 python main.py --epochs 40      # train once -> outputs/artifacts.pt + metrics + plots
 streamlit run app.py            # interactive single-transaction demo
 ```
 
-- `python main.py --full` uses the full dataset (no subsampling); `--device cpu|cuda|auto`.
-- Real data: drop Kaggle `fraudTrain.csv`/`fraudTest.csv` into `data/` (or `archive/`); auto-detected and preferred over synthetic.
+- **Real data required** (no synthetic fallback): drop Kaggle `fraudTrain.csv`/`fraudTest.csv` into `data/` (or `archive/`); training aborts with a clear error if absent.
+- Train/test sizes are drawn from the real data via `--train-size N` / `--test-size N` (omit `--test-size` for the full test set); `--full` uses the entire dataset; `--device cpu|cuda|auto`.
 
 ## Architecture
 

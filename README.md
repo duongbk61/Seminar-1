@@ -42,7 +42,6 @@ needed to demo.**
 ```
 code/
 ├─ data/                  # put fraudTrain.csv / fraudTest.csv here (see data/README.md)
-│  └─ sample/             # synthetic data written by make_sample_data.py
 ├─ src/
 │  ├─ config.py           # all hyper-parameters (paper Table 3)
 │  ├─ data_prep.py        # per-type featurizers + hetero-graph construction
@@ -53,7 +52,6 @@ code/
 │  ├─ scorer.py           # FraudScorer: real-time single-transaction scoring
 │  └─ utils.py            # seeding + device selection
 ├─ tests/                 # pytest suite (17 tests)
-├─ make_sample_data.py    # synthetic Sparkov-schema data (run without Kaggle)
 ├─ main.py                # `python main.py` → train
 ├─ app.py                 # `streamlit run app.py` → demo
 └─ requirements.txt
@@ -74,13 +72,21 @@ This installs `torch`, `torch_geometric`, `pandas`, `numpy`, `scikit-learn`,
 `matplotlib`, `streamlit`, and `pytest`. CPU-only is fine; a CUDA GPU is used
 automatically when available.
 
-## How to run — quick start (no dataset needed)
+## How to run — quick start
+
+First get the dataset (one time): download the Kaggle
+`kartik2112/fraud-detection` dataset and place `fraudTrain.csv` and
+`fraudTest.csv` in `data/` (or `archive/`) — see [`data/README.md`](data/README.md).
+Then:
 
 ```bash
-python make_sample_data.py      # writes synthetic data/sample/fraud{Train,Test}.csv
-python main.py --epochs 40      # train, evaluate, save outputs/artifacts.pt + plots
-streamlit run app.py            # open the interactive demo in the browser
+python main.py --epochs 40 --train-size 50000   # train, evaluate, save artifacts + plots
+streamlit run app.py                            # open the interactive demo in the browser
 ```
+
+Train/test sizes are drawn from the real data via `--train-size` / `--test-size`
+(see [How to train](#how-to-train)); omit them for the config defaults, or pass
+`--full` to use the entire dataset.
 
 In the demo you can load a random genuine/fraud example, pick a known
 customer/merchant or invent brand-new ones (cold-start), tweak the amount / hour /
@@ -95,12 +101,13 @@ featurizers on **genuine** rows only → build the graph → train the auto-enco
 pick thresholds → evaluate on the test graph → save artifacts, metrics, and plots.
 
 ```bash
-python main.py                          # defaults from src/config.py
-python main.py --epochs 40              # fewer epochs (quick run)
-python main.py --train-subsample 20000  # smaller train pool (CPU-friendly)
-python main.py --full                   # use the ENTIRE dataset (no subsampling)
-python main.py --device cpu             # force CPU (also: cuda | auto)
-python main.py --seed 123               # change the RNG seed
+python main.py                       # defaults from src/config.py
+python main.py --epochs 40           # fewer epochs (quick run)
+python main.py --train-size 20000    # draw 20k rows from the real train file (CPU-friendly)
+python main.py --test-size 20000     # draw 20k rows from the real test file
+python main.py --full                # use the ENTIRE real dataset (no sampling)
+python main.py --device cpu          # force CPU (also: cuda | auto)
+python main.py --seed 123            # change the RNG seed
 ```
 
 CLI flags (see `main.py`):
@@ -108,25 +115,21 @@ CLI flags (see `main.py`):
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--epochs N` | 150 | training epochs (early-stops on val AUC-PR) |
-| `--train-subsample N` | 120000 | rows kept from the train file (all fraud kept) |
-| `--test-subsample N` | None | rows kept from the test file (None = full test) |
-| `--full` | off | use the entire dataset, no subsampling |
+| `--train-size N` | 120000 | rows drawn from the real train file (all fraud always kept) |
+| `--test-size N` | full | rows drawn from the real test file (omit = full test set) |
+| `--full` | off | use the entire real dataset (ignores `--train-size`/`--test-size`) |
 | `--device` | auto | `auto` \| `cpu` \| `cuda` |
 | `--seed N` | 42 | random seed |
 
-All hyper-parameters (hidden size 64, 16 heads, dropout 0.4, weight-decay 0.01,
-etc.) live in [`src/config.py`](src/config.py) and follow the paper's **Table 3**.
+`--train-size`/`--test-size` are always sampled from the **real** dataset; all
+fraud rows are kept (the auto-encoder trains on genuine rows, and fraud is used
+for validation/threshold selection). All hyper-parameters (hidden size 64, 16
+heads, dropout 0.4, weight-decay 0.01, etc.) live in
+[`src/config.py`](src/config.py) and follow the paper's **Table 3**.
 
-### With the real dataset
-
-1. Download from Kaggle (`kartik2112/fraud-detection`) and place `fraudTrain.csv`
-   and `fraudTest.csv` in `data/` or `archive/` (see `data/README.md`).
-2. `python main.py` (subsamples ~120k train by default; test uses the full set).
-   Add `--full` to train on everything.
-3. `streamlit run app.py`.
-
-The real files are detected automatically and take priority over the synthetic
-sample data.
+> **Dataset required.** There is no synthetic fallback — training aborts with a
+> clear error if `fraudTrain.csv` / `fraudTest.csv` are not found in `data/` or
+> `archive/`.
 
 ## How to test
 
