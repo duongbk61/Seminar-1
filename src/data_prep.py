@@ -134,7 +134,7 @@ class TypeFeaturizer:
             out["merch_lat_f"] = pd.to_numeric(df["merch_lat"], errors="coerce").fillna(0.0)
             out["merch_long_f"] = pd.to_numeric(df["merch_long"], errors="coerce").fillna(0.0)
             out["category"] = df["category"].astype(str).values
-        else:  # transaction
+        elif self.kind == "transaction":
             amt = pd.to_numeric(df["amt"], errors="coerce").fillna(0.0)
             out["log_amt"] = np.log1p(amt.clip(lower=0))
             ts = pd.to_datetime(df["trans_date_trans_time"], errors="coerce")
@@ -151,6 +151,8 @@ class TypeFeaturizer:
                 pd.to_numeric(df["merch_long"], errors="coerce").fillna(0.0).values,
             )
             out["log_distance"] = np.log1p(np.clip(dist, 0, None))
+        else:
+            raise ValueError(f"unknown TypeFeaturizer kind: {self.kind!r}")
         return out
 
     def fit(self, df: pd.DataFrame) -> "TypeFeaturizer":
@@ -183,6 +185,8 @@ class TypeFeaturizer:
 
     @property
     def dim(self) -> int:
+        if self.mean_ is None:
+            raise RuntimeError("TypeFeaturizer.dim read before fit(); call fit() first")
         return len(self.cont_cols) + sum(len(self.cat_vocab[c]) for c in self.cat_cols)
 
     @property
