@@ -10,10 +10,11 @@ Design goals
   new customer/merchant just inherits the feature vector of the incoming
   transaction.
 
-Heterogeneous graph (paper Section 3): three node types
-    customer  (cc_num)
-    merchant  (merchant)
-    transaction (trans_num)   <- the nodes we reconstruct
+Heterogeneous graph (paper Section 3): three node types, each with its own
+attribute set (per-type featurizers):
+    customer  (cc_num) -> TypeFeaturizer("customer", ...)
+    merchant  (merchant) -> TypeFeaturizer("merchant", ...)
+    transaction (trans_num) -> TypeFeaturizer("transaction", ...)
 with bidirectional edges  customer <-> transaction <-> merchant.
 """
 from __future__ import annotations
@@ -31,15 +32,13 @@ REQUIRED_COLS = [
     "city_pop", "lat", "long", "merch_lat", "merch_long", "dob",
 ]
 
-CONT_COLS = ["log_amt", "age", "log_city_pop", "log_distance"]
-CYC_COLS = ["hour_sin", "hour_cos", "dow_sin", "dow_cos"]
-# The auto-encoder reconstructs ONLY these behavioural features (amount + time).
-# Everything else (categories, gender, age, location, day-of-week) is ENCODER
-# CONTEXT only: those are either inherently unpredictable by MSE or carry no fraud
-# signal, so reconstructing them just adds a constant error floor that dilutes the
-# anomaly score. EDA on the real data: amt separates fraud by ~1.6 sigma, hour by
-# ~1.0 sigma; distance/city_pop are ~0.01 (useless).
-RECON_COLS = ["log_amt", "hour_sin", "hour_cos"]
+# ----- per-type attribute definitions (paper: heterogeneous attribute sets) -----
+CUST_CONT = ["age", "log_city_pop", "home_lat", "home_long"]
+CUST_CAT = ["gender"]
+MERC_CONT = ["merch_lat_f", "merch_long_f"]
+MERC_CAT = ["category"]
+TXN_CONT = ["log_amt", "log_distance", "hour_sin", "hour_cos", "dow_sin", "dow_cos"]
+TXN_CAT: list[str] = []
 
 
 # --------------------------------------------------------------------------- #
@@ -105,96 +104,123 @@ def _haversine_km(lat1, lon1, lat2, lon2):
     return 2 * 6371.0 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
 
 
-def _raw_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Turn raw records into the intermediate numeric/categorical columns."""
-    out = pd.DataFrame(index=df.index)
-    amt = pd.to_numeric(df["amt"], errors="coerce").fillna(0.0)
-    out["log_amt"] = np.log1p(amt.clip(lower=0))
-
-    ts = pd.to_datetime(df["trans_date_trans_time"], errors="coerce")
-    hour = ts.dt.hour.fillna(12).astype(float)
-    dow = ts.dt.dayofweek.fillna(0).astype(float)
-    out["hour_sin"] = np.sin(2 * np.pi * hour / 24.0)
-    out["hour_cos"] = np.cos(2 * np.pi * hour / 24.0)
-    out["dow_sin"] = np.sin(2 * np.pi * dow / 7.0)
-    out["dow_cos"] = np.cos(2 * np.pi * dow / 7.0)
-
-    dob = pd.to_datetime(df["dob"], errors="coerce")
-    age = (ts.dt.year - dob.dt.year)
-    out["age"] = age.fillna(age.median() if age.notna().any() else 40).astype(float)
-
-    pop = pd.to_numeric(df["city_pop"], errors="coerce").fillna(0.0)
-    out["log_city_pop"] = np.log1p(pop.clip(lower=0))
-
-    dist = _haversine_km(
-        pd.to_numeric(df["lat"], errors="coerce").fillna(0.0).values,
-        pd.to_numeric(df["long"], errors="coerce").fillna(0.0).values,
-        pd.to_numeric(df["merch_lat"], errors="coerce").fillna(0.0).values,
-        pd.to_numeric(df["merch_long"], errors="coerce").fillna(0.0).values,
-    )
-    out["log_distance"] = np.log1p(np.clip(dist, 0, None))
-
-    out["category"] = df["category"].astype(str).values
-    out["gender_M"] = (df["gender"].astype(str).str.upper() == "M").astype(float).values
-    return out
-
-
 @dataclass
-class Featurizer:
-    """Fit on the genuine training rows, then transform any records (incl. one row)."""
-    cat_vocab: list[str] = field(default_factory=list)
+class TypeFeaturizer:
+    """Fit on genuine rows; transform any records (incl. one) for ONE node type.
+
+    Layout of the output vector: standardized continuous columns FIRST, then one
+    one-hot block per categorical column (order = `cat_cols`).
+    """
+    kind: str
+    cont_cols: list[str] = field(default_factory=list)
+    cat_cols: list[str] = field(default_factory=list)
+    cat_vocab: dict = field(default_factory=dict)      # name -> sorted class list
     mean_: np.ndarray | None = None
     scale_: np.ndarray | None = None
-    feature_names: list[str] = field(default_factory=list)
 
-    def fit(self, df: pd.DataFrame) -> "Featurizer":
-        raw = _raw_frame(df)
-        self.cat_vocab = sorted(raw["category"].unique().tolist())
-        cont = raw[CONT_COLS].to_numpy(dtype=np.float64)
+    def _raw(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = pd.DataFrame(index=df.index)
+        if self.kind == "customer":
+            ts = pd.to_datetime(df["trans_date_trans_time"], errors="coerce")
+            dob = pd.to_datetime(df["dob"], errors="coerce")
+            age = (ts.dt.year - dob.dt.year)
+            out["age"] = age.fillna(age.median() if age.notna().any() else 40).astype(float)
+            pop = pd.to_numeric(df["city_pop"], errors="coerce").fillna(0.0)
+            out["log_city_pop"] = np.log1p(pop.clip(lower=0))
+            out["home_lat"] = pd.to_numeric(df["lat"], errors="coerce").fillna(0.0)
+            out["home_long"] = pd.to_numeric(df["long"], errors="coerce").fillna(0.0)
+            out["gender"] = df["gender"].astype(str).str.upper().values
+        elif self.kind == "merchant":
+            out["merch_lat_f"] = pd.to_numeric(df["merch_lat"], errors="coerce").fillna(0.0)
+            out["merch_long_f"] = pd.to_numeric(df["merch_long"], errors="coerce").fillna(0.0)
+            out["category"] = df["category"].astype(str).values
+        else:  # transaction
+            amt = pd.to_numeric(df["amt"], errors="coerce").fillna(0.0)
+            out["log_amt"] = np.log1p(amt.clip(lower=0))
+            ts = pd.to_datetime(df["trans_date_trans_time"], errors="coerce")
+            hour = ts.dt.hour.fillna(12).astype(float)
+            dow = ts.dt.dayofweek.fillna(0).astype(float)
+            out["hour_sin"] = np.sin(2 * np.pi * hour / 24.0)
+            out["hour_cos"] = np.cos(2 * np.pi * hour / 24.0)
+            out["dow_sin"] = np.sin(2 * np.pi * dow / 7.0)
+            out["dow_cos"] = np.cos(2 * np.pi * dow / 7.0)
+            dist = _haversine_km(
+                pd.to_numeric(df["lat"], errors="coerce").fillna(0.0).values,
+                pd.to_numeric(df["long"], errors="coerce").fillna(0.0).values,
+                pd.to_numeric(df["merch_lat"], errors="coerce").fillna(0.0).values,
+                pd.to_numeric(df["merch_long"], errors="coerce").fillna(0.0).values,
+            )
+            out["log_distance"] = np.log1p(np.clip(dist, 0, None))
+        return out
+
+    def fit(self, df: pd.DataFrame) -> "TypeFeaturizer":
+        raw = self._raw(df)
+        cont = raw[self.cont_cols].to_numpy(dtype=np.float64)
         self.mean_ = cont.mean(axis=0)
         std = cont.std(axis=0)
         std[std < 1e-8] = 1.0
         self.scale_ = std
-        self.feature_names = (
-            list(CONT_COLS) + list(CYC_COLS)
-            + [f"cat={c}" for c in self.cat_vocab] + ["gender_M"]
-        )
+        for c in self.cat_cols:
+            self.cat_vocab[c] = sorted(raw[c].astype(str).unique().tolist())
         return self
 
     def transform(self, df: pd.DataFrame) -> np.ndarray:
-        raw = _raw_frame(df)
-        cont = (raw[CONT_COLS].to_numpy(dtype=np.float64) - self.mean_) / self.scale_
-        cyc = raw[CYC_COLS].to_numpy(dtype=np.float64)
-        # one-hot category against the fitted vocabulary (unknown -> all zeros)
-        idx = {c: i for i, c in enumerate(self.cat_vocab)}
-        oh = np.zeros((len(raw), len(self.cat_vocab)), dtype=np.float64)
-        for r, c in enumerate(raw["category"].values):
-            if c in idx:
-                oh[r, idx[c]] = 1.0
-        gender = raw[["gender_M"]].to_numpy(dtype=np.float64)
-        X = np.hstack([cont, cyc, oh, gender]).astype(np.float32)
-        return X
+        raw = self._raw(df)
+        cont = (raw[self.cont_cols].to_numpy(dtype=np.float64) - self.mean_) / self.scale_
+        blocks = [cont]
+        for c in self.cat_cols:
+            vocab = self.cat_vocab[c]
+            idx = {v: i for i, v in enumerate(vocab)}
+            oh = np.zeros((len(raw), len(vocab)), dtype=np.float64)
+            for r, v in enumerate(raw[c].astype(str).values):
+                if v in idx:
+                    oh[r, idx[v]] = 1.0
+            blocks.append(oh)
+        return np.hstack(blocks).astype(np.float32)
 
     def transform_one(self, record: dict) -> np.ndarray:
         return self.transform(pd.DataFrame([record]))[0]
 
     @property
     def dim(self) -> int:
-        return len(self.feature_names)
+        return len(self.cont_cols) + sum(len(self.cat_vocab[c]) for c in self.cat_cols)
 
     @property
-    def recon_idx(self) -> list[int]:
-        """Column indices (into the feature vector) of the reconstruction targets."""
-        name_to_i = {n: i for i, n in enumerate(self.feature_names)}
-        return [name_to_i[c] for c in RECON_COLS]
+    def cont_idx(self) -> list[int]:
+        return list(range(len(self.cont_cols)))
 
     @property
-    def recon_names(self) -> list[str]:
-        return list(RECON_COLS)
+    def cat_groups(self) -> list[tuple[str, int, int]]:
+        groups, start = [], len(self.cont_cols)
+        for c in self.cat_cols:
+            w = len(self.cat_vocab[c])
+            groups.append((c, start, w))
+            start += w
+        return groups
+
+    @property
+    def feature_names(self) -> list[str]:
+        names = list(self.cont_cols)
+        for c in self.cat_cols:
+            names += [f"{c}={v}" for v in self.cat_vocab[c]]
+        return names
+
+
+def make_featurizers() -> dict:
+    return {
+        "customer": TypeFeaturizer("customer", list(CUST_CONT), list(CUST_CAT)),
+        "merchant": TypeFeaturizer("merchant", list(MERC_CONT), list(MERC_CAT)),
+        "transaction": TypeFeaturizer("transaction", list(TXN_CONT), list(TXN_CAT)),
+    }
+
+
+def type_targets_from_featurizers(feats: dict) -> dict:
+    return {t: {"cont": len(f.cont_cols), "cat_groups": f.cat_groups}
+            for t, f in feats.items()}
 
 
 # --------------------------------------------------------------------------- #
-# graph construction
+# helper for graph construction & demo
 # --------------------------------------------------------------------------- #
 def _mean_by_group(X: np.ndarray, group_idx: np.ndarray, n_groups: int) -> np.ndarray:
     F = X.shape[1]
@@ -204,54 +230,6 @@ def _mean_by_group(X: np.ndarray, group_idx: np.ndarray, n_groups: int) -> np.nd
     np.add.at(counts, group_idx, 1.0)
     counts[counts == 0] = 1.0
     return (sums / counts[:, None]).astype(np.float32)
-
-
-def build_hetero_data(df: pd.DataFrame, feat: Featurizer):
-    """Return (HeteroData, info) with mean-aggregated customer/merchant features."""
-    import torch
-    from torch_geometric.data import HeteroData
-
-    X_tx = feat.transform(df)                       # [N, F]
-    cust_uni, cust_idx = np.unique(df["cc_num"].values, return_inverse=True)
-    merch_uni, merch_idx = np.unique(df["merchant"].values, return_inverse=True)
-    tx_idx = np.arange(len(df))
-
-    cust_x = _mean_by_group(X_tx, cust_idx, len(cust_uni))
-    merch_x = _mean_by_group(X_tx, merch_idx, len(merch_uni))
-
-    data = HeteroData()
-    data["customer"].x = torch.from_numpy(cust_x)
-    data["merchant"].x = torch.from_numpy(merch_x)
-    data["transaction"].x = torch.from_numpy(X_tx)
-    data["transaction"].y = torch.tensor(df["is_fraud"].to_numpy(dtype=np.int64))
-
-    c2t = np.vstack([cust_idx, tx_idx]).astype(np.int64)
-    m2t = np.vstack([merch_idx, tx_idx]).astype(np.int64)
-    data["customer", "makes", "transaction"].edge_index = torch.from_numpy(c2t)
-    data["transaction", "rev_makes", "customer"].edge_index = torch.from_numpy(c2t[[1, 0]])
-    data["merchant", "sells", "transaction"].edge_index = torch.from_numpy(m2t)
-    data["transaction", "rev_sells", "merchant"].edge_index = torch.from_numpy(m2t[[1, 0]])
-
-    info = {
-        "customer_ids": cust_uni,
-        "merchant_ids": merch_uni,
-        "labels": df["is_fraud"].to_numpy(dtype=np.int64),
-        "n_tx": len(df),
-    }
-    return data, info
-
-
-def compute_reference_store(df_genuine: pd.DataFrame, feat: Featurizer) -> dict:
-    """Profiles of known customers/merchants for the demo (mean genuine tx vector)."""
-    X = feat.transform(df_genuine)
-    out = {"feature_dim": int(X.shape[1]), "global_mean": X.mean(axis=0).astype(np.float32)}
-    for key, col in (("customer", "cc_num"), ("merchant", "merchant")):
-        uni, inv = np.unique(df_genuine[col].astype(str).values, return_inverse=True)
-        means = _mean_by_group(X, inv, len(uni))
-        counts = np.bincount(inv, minlength=len(uni))
-        out[key] = {str(k): means[i] for i, k in enumerate(uni)}
-        out[key + "_count"] = {str(k): int(counts[i]) for i, k in enumerate(uni)}
-    return out
 
 
 def build_demo_aux(train_df: pd.DataFrame, test_df: pd.DataFrame,
