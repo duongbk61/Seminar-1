@@ -35,6 +35,12 @@ def search_threshold(scores: np.ndarray, labels: np.ndarray) -> tuple[float, flo
     return thr, float(f1[best])
 
 
+def mu_2sigma_threshold(genuine_scores) -> float:
+    """Paper Eq. 9: Threshold = mu + 2*sigma of genuine reconstruction errors."""
+    s = np.asarray(genuine_scores, dtype=float)
+    return float(s.mean() + 2.0 * s.std())
+
+
 def compute_metrics(scores: np.ndarray, labels: np.ndarray, threshold: float) -> dict:
     scores = np.asarray(scores, dtype=float)
     labels = np.asarray(labels, dtype=int)
