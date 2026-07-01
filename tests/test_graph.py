@@ -42,6 +42,6 @@ def test_reference_store_keys():
     for k in feats:
         feats[k].fit(df)
     ref = compute_reference_store(df[df.is_fraud == 0], feats)
-    assert set(ref["customer"].keys()) <= {"c0", "c1", "c2"}
+    assert set(ref["customer"].keys()) == {"c0", "c1", "c2"}
     vec = next(iter(ref["customer"].values()))
     assert len(vec) == feats["customer"].dim

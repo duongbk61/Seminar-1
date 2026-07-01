@@ -331,6 +331,9 @@ def build_hetero_data(df: pd.DataFrame, feats: dict):
 
 def compute_reference_store(df_genuine: pd.DataFrame, feats: dict) -> dict:
     """Per-entity genuine feature vectors for known-entity lookup in the demo."""
+    df_genuine = df_genuine.copy()
+    df_genuine["cc_num"] = df_genuine["cc_num"].astype(str)
+    df_genuine["merchant"] = df_genuine["merchant"].astype(str)
     out = {}
     cust = df_genuine.drop_duplicates("cc_num")
     Xc = feats["customer"].transform(cust)
