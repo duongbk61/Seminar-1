@@ -288,6 +288,61 @@ def _py(v):
     return v
 
 
+def build_hetero_data(df: pd.DataFrame, feats: dict):
+    """HeteroData with per-type node features; transaction nodes carry labels."""
+    import torch
+    from torch_geometric.data import HeteroData
+
+    cust_uni, cust_idx = np.unique(df["cc_num"].astype(str).values, return_inverse=True)
+    merch_uni, merch_idx = np.unique(df["merchant"].astype(str).values, return_inverse=True)
+    tx_idx = np.arange(len(df))
+
+    df_s = df.copy()
+    df_s["cc_num"] = df_s["cc_num"].astype(str)
+    df_s["merchant"] = df_s["merchant"].astype(str)
+    cust_df = df_s.drop_duplicates("cc_num").set_index("cc_num").loc[cust_uni].reset_index()
+    merch_df = df_s.drop_duplicates("merchant").set_index("merchant").loc[merch_uni].reset_index()
+
+    X_cust = feats["customer"].transform(cust_df)
+    X_merch = feats["merchant"].transform(merch_df)
+    X_txn = feats["transaction"].transform(df)
+
+    data = HeteroData()
+    data["customer"].x = torch.from_numpy(X_cust)
+    data["merchant"].x = torch.from_numpy(X_merch)
+    data["transaction"].x = torch.from_numpy(X_txn)
+    data["transaction"].y = torch.tensor(df["is_fraud"].to_numpy(dtype=np.int64))
+
+    c2t = np.vstack([cust_idx, tx_idx]).astype(np.int64)
+    m2t = np.vstack([merch_idx, tx_idx]).astype(np.int64)
+    data["customer", "makes", "transaction"].edge_index = torch.from_numpy(c2t)
+    data["transaction", "rev_makes", "customer"].edge_index = torch.from_numpy(c2t[[1, 0]])
+    data["merchant", "sells", "transaction"].edge_index = torch.from_numpy(m2t)
+    data["transaction", "rev_sells", "merchant"].edge_index = torch.from_numpy(m2t[[1, 0]])
+
+    info = {
+        "labels": df["is_fraud"].to_numpy(dtype=np.int64),
+        "n_tx": len(df),
+        "customer_ids": cust_uni,
+        "merchant_ids": merch_uni,
+    }
+    return data, info
+
+
+def compute_reference_store(df_genuine: pd.DataFrame, feats: dict) -> dict:
+    """Per-entity genuine feature vectors for known-entity lookup in the demo."""
+    out = {}
+    cust = df_genuine.drop_duplicates("cc_num")
+    Xc = feats["customer"].transform(cust)
+    out["customer"] = {str(k): Xc[i] for i, k in enumerate(cust["cc_num"].values)}
+    merc = df_genuine.drop_duplicates("merchant")
+    Xm = feats["merchant"].transform(merc)
+    out["merchant"] = {str(k): Xm[i] for i, k in enumerate(merc["merchant"].values)}
+    out["customer_dim"] = int(feats["customer"].dim)
+    out["merchant_dim"] = int(feats["merchant"].dim)
+    return out
+
+
 HETERO_METADATA = (
     ["customer", "merchant", "transaction"],
     [
