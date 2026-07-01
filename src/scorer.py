@@ -1,13 +1,12 @@
 """Real-time fraud scorer used by the Streamlit demo.
 
-Loads the artifacts saved by training and scores a *single* incoming transaction
-without any retraining. It builds a tiny 3-node heterogeneous graph
-(transaction + its customer + its merchant) and runs the encoder/decoder:
+Loads the artifacts saved by training and scores a SINGLE transaction with no
+retraining. It builds a 3-node heterogeneous graph (the transaction + its
+customer + its merchant), each node featurized by its OWN type featurizer, and
+compares the transaction's reconstruction error to the mu+2sigma threshold.
 
-* known customer/merchant  -> use the stored genuine profile (mean tx vector)
-* new  customer/merchant   -> cold-start from the transaction itself
-
-Verdict: reconstruction error >= threshold  =>  FRAUD.
+* known customer/merchant -> use the stored genuine feature vector
+* new customer/merchant   -> cold-start from the incoming record's own fields
 """
 from __future__ import annotations
 
@@ -15,71 +14,60 @@ from pathlib import Path
 
 import numpy as np
 
-from .data_prep import Featurizer
+from .data_prep import TypeFeaturizer, HETERO_METADATA
 from .model import HeteroGraphAutoEncoder
 
 
 class FraudScorer:
-    def __init__(self, model, featurizer, reference_store, threshold,
-                 feature_names, metrics, device="cpu", demo_aux=None, is_sample=False,
-                 resid_var=None, recon_names=None, metrics_balanced=None):
-        import torch
-
+    def __init__(self, model, feats, reference_store, threshold, feature_names,
+                 metrics, device="cpu", demo_aux=None, is_sample=False,
+                 metrics_f1=None, threshold_f1=None):
         self.model = model
-        self.feat = featurizer
+        self.feats = feats                      # dict type -> TypeFeaturizer
         self.ref = reference_store
         self.threshold = float(threshold)
-        self.feature_names = feature_names
+        self.threshold_f1 = float(threshold_f1) if threshold_f1 is not None else None
+        self.feature_names = feature_names      # dict type -> list
         self.metrics = metrics or {}
-        self.metrics_balanced = metrics_balanced or {}
+        self.metrics_f1 = metrics_f1 or {}
         self.device = device
         self.demo_aux = demo_aux or {}
         self.is_sample = is_sample
-        self.resid_var = None if resid_var is None else torch.as_tensor(resid_var, dtype=torch.float32)
-        self.recon_idx = model.recon_idx.tolist()
-        self.recon_names = recon_names or [feature_names[i] for i in self.recon_idx]
+        self.txn_cont_names = feats["transaction"].cont_cols
         self.model.eval()
 
-    # ------------------------------------------------------------------ #
     @classmethod
     def load(cls, artifact_path: str | Path, device: str = "cpu") -> "FraudScorer":
         import torch
-
         art = torch.load(artifact_path, map_location=device, weights_only=False)
-        feat = Featurizer(**art["featurizer"])
+        feats = {k: TypeFeaturizer(**d) for k, d in art["featurizers"].items()}
         model = HeteroGraphAutoEncoder(**art["model_kwargs"])
         model.load_state_dict(art["model_state"])
         model.to(device).eval()
-        return cls(model, feat, art["reference_store"], art["threshold"],
+        return cls(model, feats, art["reference_store"], art["threshold_mu2sigma"],
                    art["feature_names"], art.get("metrics", {}), device,
-                   demo_aux=art.get("demo_aux", {}),
-                   is_sample=art.get("is_sample_data", False),
-                   resid_var=art.get("resid_var"),
-                   recon_names=art.get("recon_names"),
-                   metrics_balanced=art.get("metrics_balanced"))
+                   demo_aux=art.get("demo_aux", {}), is_sample=art.get("is_sample_data", False),
+                   metrics_f1=art.get("metrics_f1", {}), threshold_f1=art.get("threshold_f1"))
 
-    # ------------------------------------------------------------------ #
-    def known_customers(self, limit: int | None = None) -> list[str]:
+    def known_customers(self, limit=None):
         ids = list(self.ref.get("customer", {}).keys())
         return ids[:limit] if limit else ids
 
-    def known_merchants(self, limit: int | None = None) -> list[str]:
+    def known_merchants(self, limit=None):
         ids = list(self.ref.get("merchant", {}).keys())
         return ids[:limit] if limit else ids
 
-    def _profile(self, kind: str, key: str, fallback: np.ndarray):
-        """Stored genuine profile for a known entity, else cold-start fallback."""
+    def _profile(self, kind, key, fallback):
         table = self.ref.get(kind, {})
         if key in table:
             return np.asarray(table[key], dtype=np.float32), True
         return fallback.astype(np.float32), False
 
-    def _build_single_graph(self, x_tx, cust_vec, merch_vec):
+    def _build_single_graph(self, x_txn, cust_vec, merch_vec):
         import torch
         from torch_geometric.data import HeteroData
-
         data = HeteroData()
-        data["transaction"].x = torch.tensor(x_tx[None, :], dtype=torch.float32)
+        data["transaction"].x = torch.tensor(x_txn[None, :], dtype=torch.float32)
         data["customer"].x = torch.tensor(cust_vec[None, :], dtype=torch.float32)
         data["merchant"].x = torch.tensor(merch_vec[None, :], dtype=torch.float32)
         e = torch.tensor([[0], [0]], dtype=torch.long)
@@ -89,26 +77,23 @@ class FraudScorer:
         data["transaction", "rev_sells", "merchant"].edge_index = e.clone()
         return data
 
-    # ------------------------------------------------------------------ #
     def score_transaction(self, record: dict, top_k: int = 5) -> dict:
-        """Score one raw transaction record (dict with the Sparkov columns)."""
-        x_tx = self.feat.transform_one(record)
-        cust_key = str(record.get("cc_num", ""))
-        merch_key = str(record.get("merchant", ""))
-        cust_vec, cust_known = self._profile("customer", cust_key, x_tx)
-        merch_vec, merch_known = self._profile("merchant", merch_key, x_tx)
+        x_txn = self.feats["transaction"].transform_one(record)
+        cust_cold = self.feats["customer"].transform_one(record)
+        merch_cold = self.feats["merchant"].transform_one(record)
+        cust_vec, cust_known = self._profile("customer", str(record.get("cc_num", "")), cust_cold)
+        merch_vec, merch_known = self._profile("merchant", str(record.get("merchant", "")), merch_cold)
 
-        data = self._build_single_graph(x_tx, cust_vec, merch_vec)
-        pfe = self.model.per_feature_error(data, self.device)[0]   # [F] tensor
-        error = float(pfe.mean())     # plain reconstruction error (the paper's score)
-        per_feat = pfe.numpy()        # raw per-feature error -> ranks the "why"
+        data = self._build_single_graph(x_txn, cust_vec, merch_vec)
+        error = float(self.model.transaction_scores(data, self.device)[0])
+        feat_err = self.model.transaction_feature_errors(data, self.device)
+        per_feat = np.array([float(feat_err[i][0]) for i in range(len(self.txn_cont_names))])
 
         is_fraud = error >= self.threshold
         order = np.argsort(per_feat)[::-1][:top_k]
         top_features = [
-            {"feature": self.recon_names[i],
-             "error": float(per_feat[i]),
-             "value": float(x_tx[self.recon_idx[i]])}
+            {"feature": self.txn_cont_names[i], "error": float(per_feat[i]),
+             "value": float(x_txn[i])}
             for i in order
         ]
         return {
