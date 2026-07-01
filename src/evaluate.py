@@ -63,6 +63,53 @@ def compute_metrics(scores: np.ndarray, labels: np.ndarray, threshold: float) ->
     return out
 
 
+def epoch_diagnostics(val_scores, val_labels, loss_parts: dict | None = None) -> dict:
+    """Per-epoch training diagnostics for visualizing the training process.
+
+    Everything here is derived from the VALIDATION split (never the test set —
+    peeking at test each epoch would leak it). Returns a flat dict of scalars so
+    the caller can append each value into a per-series history:
+
+      * threshold (paper Eq. 9): ``thr_mu``, ``thr_sigma``, ``thr_mu2sigma`` on
+        held-out genuine reconstruction errors;
+      * error gap: mean/median recon error for genuine vs fraud rows — the
+        separation the anomaly detector relies on;
+      * metrics @ that epoch's mu+2sigma threshold: ``val_precision``,
+        ``val_recall``, ``val_f1``, plus ``val_roc_auc`` / ``val_auc_pr``;
+      * per-type reconstruction loss (from ``ae_loss``'s ``parts``), if given.
+    """
+    scores = np.asarray(val_scores, dtype=float)
+    labels = np.asarray(val_labels, dtype=int)
+    genuine = scores[labels == 0]
+    fraud = scores[labels == 1]
+
+    mu = float(genuine.mean()) if genuine.size else float("nan")
+    sigma = float(genuine.std()) if genuine.size else float("nan")
+    thr = mu + 2.0 * sigma
+
+    out = {
+        "thr_mu": mu,
+        "thr_sigma": sigma,
+        "thr_mu2sigma": thr,
+        "val_err_genuine_mean": mu,
+        "val_err_fraud_mean": float(fraud.mean()) if fraud.size else float("nan"),
+        "val_err_genuine_median": float(np.median(genuine)) if genuine.size else float("nan"),
+        "val_err_fraud_median": float(np.median(fraud)) if fraud.size else float("nan"),
+    }
+
+    m = compute_metrics(scores, labels, thr)
+    out["val_precision"] = m["precision"]
+    out["val_recall"] = m["recall"]
+    out["val_f1"] = m["f1"]
+    out["val_roc_auc"] = m["roc_auc"]
+    out["val_auc_pr"] = m["auc_pr"]
+
+    if loss_parts:
+        for t, v in loss_parts.items():
+            out[f"loss_{t}"] = float(v.detach()) if hasattr(v, "detach") else float(v)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # plots (mirror Figure 5 a-e)
 # --------------------------------------------------------------------------- #
