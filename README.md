@@ -53,7 +53,7 @@ code/
 │  └─ utils.py            # seeding + device selection
 ├─ tests/                 # pytest suite (17 tests)
 ├─ main.py                # `python main.py` → train
-├─ app.py                 # `streamlit run app.py` → demo
+├─ app.py                 # `python -m streamlit run app.py` → demo
 └─ requirements.txt
 ```
 
@@ -81,18 +81,13 @@ Then:
 
 ```bash
 python main.py --epochs 40 --train-size 50000   # train, evaluate, save artifacts + plots
-streamlit run app.py                            # open the interactive demo in the browser
+python -m streamlit run app.py                  # open the interactive demo in the browser
 ```
 
 Train/test sizes are drawn from the real data via `--train-size` / `--test-size`
 (see [How to train](#how-to-train)); omit them for the config defaults, or pass
-`--full` to use the entire dataset.
-
-In the demo you can load a random genuine/fraud example, pick a known
-customer/merchant or invent brand-new ones (cold-start), tweak the amount / hour /
-category, and watch the reconstruction error cross the fraud threshold — with a
-per-feature breakdown of *why*. A **📈 Training progress** panel plots the
-per-epoch loss and validation AUC-PR curves saved with the model.
+`--full` to use the entire dataset. See [The demo app](#the-demo-app) for what the
+demo contains and how to use it.
 
 ## How to train
 
@@ -148,6 +143,53 @@ python -m pytest tests/test_hgae_conv.py::test_uniform_neighbour_aggregation_is_
 
 The tests need only `torch` / `torch_geometric` / `pytest` — no dataset or trained
 model. Run them from the project root so `src/` imports resolve.
+
+## The demo app
+
+An interactive Streamlit app that scores a **single** transaction in real time
+(CPU, no retraining). It loads `outputs/artifacts.pt`, so **train first**
+([How to train](#how-to-train)).
+
+### Launch
+
+```bash
+python -m streamlit run app.py
+```
+
+This opens `http://localhost:8501` in your browser (Ctrl+C in the terminal to
+stop). Use the `python -m streamlit` form — the bare `streamlit` command only
+works if Python's `Scripts/` directory is on your PATH (often not the case on
+Windows). If the app shows *"No trained model found at outputs/artifacts.pt"*, run
+`python main.py` first.
+
+### What's in it
+
+**Sidebar — model card:** ROC-AUC / AUC-PR / F1 / Precision / Recall on the full
+test set at the μ+2σ threshold (plus the F1-sweep F1 for comparison), the decision
+threshold, and how many known customers/merchants have stored profiles.
+
+**📈 Training progress (expander):** per-epoch line charts of training loss,
+validation reconstruction error, and validation AUC-PR — read from the `history`
+saved in the artifact — with a "best val AUC-PR at epoch N" caption.
+
+**1 · Pick a transaction:**
+
+* Quick-load buttons: 🎲 *Random genuine*, 🚨 *Random fraud* (real examples from
+  the test set), 🆕 *New customer*, 🆕 *New merchant* (invent an unseen entity →
+  cold-start).
+* Three editable panels — **👤 Customer** (known cardholder → stored genuine
+  profile, or new → cold-start), **🏪 Merchant** (known or new), and **💳
+  Transaction** (amount, category, hour of day, date).
+
+**2 · Score it:** the **🔎 Check transaction** button runs the model and shows the
+verdict (✅ NON-FRAUD / 🚨 FRAUD), the reconstruction error vs. threshold and their
+ratio, an anomaly-level bar (1.0 = at threshold), known/cold-start tags, and a
+**top contributing features** table + bar chart explaining *why* it scored that way
+(plus the raw record in an expander).
+
+**Try this:** load a random genuine transaction (scores ✅), then push the amount
+up, set the hour to 3 AM, or switch to a brand-new customer/merchant, and re-score
+— watch the reconstruction error climb past the threshold and flip to 🚨.
 
 ## Outputs
 

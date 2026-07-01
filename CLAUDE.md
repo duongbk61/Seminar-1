@@ -11,7 +11,7 @@ imbalance without resampling. Master's seminar project (HUST SoICT, Group 06).
 ```bash
 pip install -r requirements.txt
 python main.py --epochs 40      # train once -> outputs/artifacts.pt + metrics + plots
-streamlit run app.py            # interactive single-transaction demo
+python -m streamlit run app.py  # interactive single-transaction demo
 ```
 
 - **Real data required** (no synthetic fallback): drop Kaggle `fraudTrain.csv`/`fraudTest.csv` into `data/` (or `archive/`); training aborts with a clear error if absent.
