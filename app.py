@@ -53,9 +53,10 @@ def random_new_merchant(categories: list[str]) -> tuple[str, dict]:
 
 def main() -> None:
     st.title("🛡️ Heterogeneous Graph Auto-Encoder — Credit Card Fraud Detection")
-    st.caption("Demo of Singh et al., *Heterogeneous Graph Auto-Encoder for Credit Card "
-               "Fraud Detection* (arXiv:2410.08121). The model learns to reconstruct "
-               "**genuine** transactions; a high reconstruction error ⇒ fraud.")
+    st.caption("Demo of Majumder et al., *Heterogeneous Graph Auto-Encoder for "
+               "Credit Card Fraud Detection* (IJCA 32(2), 2025). The model learns "
+               "to reconstruct **genuine** transactions; a high reconstruction "
+               "error ⇒ fraud.")
 
     if not ARTIFACT.exists():
         st.error("No trained model found at `outputs/artifacts.pt`.\n\n"
@@ -74,22 +75,20 @@ def main() -> None:
     with st.sidebar:
         st.header("Model performance")
         m = scorer.metrics
-        mb = scorer.metrics_balanced
         if m:
-            st.caption("Full test (imbalanced ~0.4% fraud)")
+            st.caption("Full test @ threshold = μ+2σ (paper Eq. 9)")
             st.metric("ROC-AUC", f"{m.get('roc_auc', float('nan')):.3f}")
             st.metric("AUC-PR", f"{m.get('auc_pr', float('nan')):.3f}")
-        if mb:
-            st.caption("Balanced test (50/50)")
-            st.metric("F1", f"{mb.get('f1', float('nan')):.3f}")
+            st.metric("F1", f"{m.get('f1', float('nan')):.3f}")
             st.metric("Precision / Recall",
-                      f"{mb.get('precision', 0):.2f} / {mb.get('recall', 0):.2f}")
+                      f"{m.get('precision', 0):.2f} / {m.get('recall', 0):.2f}")
+        if scorer.metrics_f1:
+            st.caption(f"(F1-sweep F1 = {scorer.metrics_f1.get('f1', float('nan')):.3f})")
         st.caption(f"Decision threshold = `{scorer.threshold:.6f}`")
         st.caption(f"Known customers: {len(known_customers)} · merchants: {len(known_merchants)}")
         if scorer.is_sample:
-            st.warning("Model trained on **synthetic sample data**. "
-                       "Put the real Kaggle CSVs in `data/` or `archive/` and "
-                       "rerun `python main.py`.")
+            st.warning("Model trained on **synthetic sample data**. Put the real "
+                       "Kaggle CSVs in `data/` or `archive/` and rerun `python main.py`.")
 
     _init_state(scorer, categories)
 
