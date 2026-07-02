@@ -20,6 +20,58 @@ from .utils import pick_device, set_seed
 ARTIFACT_PATH_NAME = "artifacts.pt"
 
 
+def _isolated_hetero(sample_df: pd.DataFrame, feats: dict):
+    """A batched graph of DISCONNECTED 3-node components (one txn + its own
+    customer + merchant), matching how the demo scores a single transaction.
+    """
+    import torch
+    from torch_geometric.data import HeteroData
+
+    X_txn = feats["transaction"].transform(sample_df)
+    X_cust = feats["customer"].transform(sample_df)
+    X_merch = feats["merchant"].transform(sample_df)
+    k = len(sample_df)
+    data = HeteroData()
+    data["customer"].x = torch.from_numpy(X_cust)
+    data["merchant"].x = torch.from_numpy(X_merch)
+    data["transaction"].x = torch.from_numpy(X_txn)
+    idx = np.arange(k, dtype=np.int64)
+    e = np.vstack([idx, idx])
+    data["customer", "makes", "transaction"].edge_index = torch.from_numpy(e)
+    data["transaction", "rev_makes", "customer"].edge_index = torch.from_numpy(e[[1, 0]])
+    data["merchant", "sells", "transaction"].edge_index = torch.from_numpy(e)
+    data["transaction", "rev_sells", "merchant"].edge_index = torch.from_numpy(e[[1, 0]])
+    return data
+
+
+def _compute_latent_scatter(model, feats, df: pd.DataFrame, device: str,
+                            n: int = 400, fraud_frac: float = 0.3, seed: int = 42) -> dict:
+    """Embed a balanced sample of transactions, fit a 2D PCA, and return the
+    projected points (+ PCA params so the demo can project new transactions).
+    """
+    if len(df) == 0:
+        return {}
+    rng = np.random.default_rng(seed)
+    n = min(n, len(df))
+    fraud_idx = df.index.values[df["is_fraud"].to_numpy() == 1]
+    gen_idx = df.index.values[df["is_fraud"].to_numpy() == 0]
+    n_fraud = min(len(fraud_idx), int(round(n * fraud_frac)))
+    n_gen = min(len(gen_idx), n - n_fraud)
+    pick = np.concatenate([rng.choice(fraud_idx, n_fraud, replace=False),
+                           rng.choice(gen_idx, n_gen, replace=False)])
+    sample = df.loc[pick]
+
+    emb = model.transaction_embeddings(_isolated_hetero(sample, feats), device)
+    from sklearn.decomposition import PCA
+    pca = PCA(n_components=2, random_state=seed)
+    xy = pca.fit_transform(emb)
+    labels = sample["is_fraud"].to_numpy(dtype=int)
+    points = [{"x": float(xy[i, 0]), "y": float(xy[i, 1]), "is_fraud": int(labels[i])}
+              for i in range(len(sample))]
+    return {"points": points, "pca_mean": pca.mean_.tolist(),
+            "pca_components": pca.components_.tolist()}
+
+
 def _split_train(df: pd.DataFrame, val_fraction: float, seed: int):
     """Genuine-only training set; validation = held-out genuine + all train fraud."""
     genuine = df[df["is_fraud"] == 0]
@@ -68,6 +120,18 @@ def run_training(cfg: Config | None = None) -> dict:
 
     model = build_model(cfg, metadata, in_dims, type_targets).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    sched = None
+    if cfg.use_scheduler:
+        from torch.optim.lr_scheduler import ReduceLROnPlateau
+        sched = ReduceLROnPlateau(opt, mode="max", factor=0.5,
+                                  patience=max(3, cfg.early_stop_patience // 3))
+    tricks = [f"denoise={cfg.denoise_std}" if cfg.denoise_std > 0 else None,
+              "scheduler" if cfg.use_scheduler else None,
+              f"grad_clip={cfg.grad_clip}" if cfg.grad_clip > 0 else None,
+              "layernorm" if cfg.use_layernorm else None]
+    tricks = [t for t in tricks if t]
+    print(f"[train] layers={cfg.encoder_layers} dropout={cfg.dropout} "
+          f"tricks=[{', '.join(tricks) or 'none (paper-faithful)'}]")
 
     val_labels = val_info["labels"]
     history: dict[str, list] = {}
@@ -75,9 +139,16 @@ def run_training(cfg: Config | None = None) -> dict:
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         opt.zero_grad()
-        recon, mu, logvar = model(train_data.x_dict, train_data.edge_index_dict)
+        # denoising: reconstruct the CLEAN inputs from noise-corrupted ones
+        x_in = train_data.x_dict
+        if cfg.denoise_std > 0:
+            x_in = {t: v + torch.randn_like(v) * cfg.denoise_std
+                    for t, v in train_data.x_dict.items()}
+        recon, mu, logvar = model(x_in, train_data.edge_index_dict)
         loss, parts = ae_loss(recon, train_data.x_dict, type_targets, prevalence)
         loss.backward()
+        if cfg.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         opt.step()
 
         val_scores = model.transaction_scores(val_data, device).numpy()
@@ -89,6 +160,8 @@ def run_training(cfg: Config | None = None) -> dict:
         for k, v in diag.items():
             history.setdefault(k, []).append(v)
         val_auc = diag["val_auc_pr"]
+        if sched is not None and np.isfinite(val_auc):
+            sched.step(val_auc)
 
         if val_auc > best_auc + 1e-4:
             best_auc = val_auc
@@ -126,18 +199,25 @@ def run_training(cfg: Config | None = None) -> dict:
 
     ref_store = data_prep.compute_reference_store(train_gen, feats)
     demo_aux = data_prep.build_demo_aux(train_raw, test_raw, seed=cfg.seed)
+    viz_graph = data_prep.build_viz_graph(train_raw, cfg.viz_max_nodes, cfg.seed,
+                                          cfg.viz_fraud_frac)
+    latent_scatter = _compute_latent_scatter(model, feats, train_raw, device,
+                                             seed=cfg.seed, fraud_frac=cfg.viz_fraud_frac)
     data_profile = data_prep.compute_data_profile(train_raw, test_raw)
 
     model_kwargs = dict(metadata=metadata, in_dims=in_dims, type_targets=type_targets,
                         hidden_dim=cfg.hidden_dim, heads=cfg.heads,
                         encoder_layers=cfg.encoder_layers, latent_dim=cfg.latent_dim,
-                        decoder_hidden=cfg.decoder_hidden, dropout=cfg.dropout)
+                        decoder_hidden=cfg.decoder_hidden, dropout=cfg.dropout,
+                        use_layernorm=cfg.use_layernorm)
     artifact = {
         "model_state": model.state_dict(),
         "model_kwargs": model_kwargs,
         "featurizers": {k: asdict(f) for k, f in feats.items()},
         "reference_store": ref_store,
         "demo_aux": demo_aux,
+        "viz_graph": viz_graph,
+        "latent_scatter": latent_scatter,
         "prevalence": prevalence,
         "threshold_mu2sigma": float(threshold_mu2sigma),
         "threshold_f1": float(threshold_f1),

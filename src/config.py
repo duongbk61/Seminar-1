@@ -44,20 +44,33 @@ class Config:
     hidden_dim: int = 64          # "Size of Hidden Layers" = 64
     heads: int = 16               # "Number of heads (H)" = 16
     encoder_layers: int = 2       # FORCED DEVIATION: Table 3 says 124 -> oversmooths
-    decoder_hidden: int = 64      # "Number of Layers for the Decoder" = 64 (width)
+    decoder_hidden: int = 32      # "Number of Layers for the Decoder" = 64 (width)
     latent_dim: int = 64          # = hidden_dim; the paper has NO bottleneck
     dropout: float = 0.4          # "Dropout Rate" = 0.4
+
+    # ----- training tricks (opt-in; off = paper-faithful; see `--small-train`) -----
+    denoise_std: float = 0.0      # >0: add Gaussian noise to encoder inputs, reconstruct clean
+    use_scheduler: bool = False   # ReduceLROnPlateau on val AUC-PR
+    grad_clip: float = 0.0        # >0: clip gradient norm
+    use_layernorm: bool = False   # LayerNorm between HGAEConv layers (fights oversmoothing)
 
     # ----- optimisation -----
     lr: float = 2e-3
     weight_decay: float = 0.01    # "Regularization Rate" = 0.01
     epochs: int = 150
-    beta: float = 0.0             # the paper has NO KL term (reconstruction-only)
+    beta: float = 5e-4             # the paper has NO KL term (reconstruction-only)
     val_fraction: float = 0.15
     early_stop_patience: int = 25
 
     seed: int = 42
     device: str = "cpu"           # no CUDA GPU detected on this machine
+
+    # ----- demo: 3D graph visualization -----
+    # Max transaction nodes sampled into the demo's interactive 3D graph (their
+    # customers/merchants are added on top). Fraud is over-sampled to ~viz_fraud_frac
+    # of the transactions so the genuine/fraud contrast is visible.
+    viz_max_nodes: int = 200
+    viz_fraud_frac: float = 0.2
 
     output_dir: Path = OUTPUT_DIR
 

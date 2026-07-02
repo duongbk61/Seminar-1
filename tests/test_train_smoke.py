@@ -54,3 +54,7 @@ def test_one_training_step_and_scoring():
     thr = mu_2sigma_threshold(scores)
     assert np.isfinite(thr)
     assert scores.shape == (40,)
+
+    emb = model.transaction_embeddings(data)
+    assert emb.shape == (40, 16)          # one latent vector per transaction
+    assert np.isfinite(emb).all()

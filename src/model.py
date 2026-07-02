@@ -24,15 +24,22 @@ from .hgae_conv import HGAEConv
 
 class HeteroGraphAutoEncoder(nn.Module):
     def __init__(self, metadata, in_dims, type_targets, hidden_dim=64, heads=16,
-                 encoder_layers=2, latent_dim=64, decoder_hidden=64, dropout=0.4):
+                 encoder_layers=2, latent_dim=64, decoder_hidden=64, dropout=0.4,
+                 use_layernorm=False):
         super().__init__()
         self.metadata = metadata
         self.node_types = list(metadata[0])
         self.type_targets = type_targets
         self.dropout = dropout
+        self.use_layernorm = use_layernorm
 
         self.in_lin = nn.ModuleDict({t: nn.Linear(in_dims[t], hidden_dim) for t in self.node_types})
         self.convs = nn.ModuleList([HGAEConv(metadata, hidden_dim, heads) for _ in range(encoder_layers)])
+        # optional LayerNorm per (layer, node type) to stabilize + fight oversmoothing
+        self.norms = nn.ModuleList([
+            nn.ModuleDict({t: nn.LayerNorm(hidden_dim) for t in self.node_types})
+            for _ in range(encoder_layers)
+        ]) if use_layernorm else None
         self.fc_mu = nn.ModuleDict({t: nn.Linear(hidden_dim, latent_dim) for t in self.node_types})
         self.fc_logvar = nn.ModuleDict({t: nn.Linear(hidden_dim, latent_dim) for t in self.node_types})
 
@@ -60,8 +67,10 @@ class HeteroGraphAutoEncoder(nn.Module):
     def encode(self, x_dict, edge_index_dict):
         h = {t: F.relu(self.in_lin[t](x)) for t, x in x_dict.items()}
         mu = logvar = None
-        for conv in self.convs:
+        for i, conv in enumerate(self.convs):
             h = conv(h, edge_index_dict)
+            if self.norms is not None:
+                h = {t: self.norms[i][t](v) for t, v in h.items()}
             h = {t: F.dropout(F.relu(v), p=self.dropout, training=self.training) for t, v in h.items()}
             mu = {t: self.fc_mu[t](h[t]) for t in h}
             logvar = {t: self.fc_logvar[t](h[t]) for t in h}
@@ -107,6 +116,32 @@ class HeteroGraphAutoEncoder(nn.Module):
         sq = (recon[t]["cont"] - x[:, :n_cont]) ** 2
         return {i: sq[:, i].cpu() for i in range(n_cont)}
 
+    @torch.no_grad()
+    def transaction_embeddings(self, data, device="cpu"):
+        """Latent embeddings (mu) for transaction nodes — powers the 2D scatter."""
+        self.eval()
+        data = data.to(device)
+        _, mu, _ = self.encode(data.x_dict, data.edge_index_dict)
+        return mu["transaction"].cpu().numpy()
+
+    @torch.no_grad()
+    def transaction_reconstruction(self, data, device="cpu") -> dict:
+        """Per continuous-feature (reconstructed, actual, squared-error) for txns.
+
+        Powers the demo's 'expected vs actual' panel: a genuine transaction is
+        reconstructed close to its input, a fraud diverges — that gap IS the
+        anomaly signal.
+        """
+        self.eval()
+        data = data.to(device)
+        recon, _, _ = self.forward(data.x_dict, data.edge_index_dict)
+        t = "transaction"
+        x = data[t].x
+        n_cont = self.type_targets[t]["cont"]
+        rec = recon[t]["cont"]
+        sq = (rec - x[:, :n_cont]) ** 2
+        return {i: (rec[:, i].cpu(), x[:, i].cpu(), sq[:, i].cpu()) for i in range(n_cont)}
+
 
 def ae_loss(recon, x_dict, type_targets, prevalence):
     """Reconstruction loss: MSE(continuous) + CE(categorical), prevalence-weighted.
@@ -132,4 +167,5 @@ def build_model(cfg, metadata, in_dims, type_targets) -> HeteroGraphAutoEncoder:
         metadata=metadata, in_dims=in_dims, type_targets=type_targets,
         hidden_dim=cfg.hidden_dim, heads=cfg.heads, encoder_layers=cfg.encoder_layers,
         latent_dim=cfg.latent_dim, decoder_hidden=cfg.decoder_hidden, dropout=cfg.dropout,
+        use_layernorm=getattr(cfg, "use_layernorm", False),
     )

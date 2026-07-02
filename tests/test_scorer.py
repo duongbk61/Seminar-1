@@ -48,6 +48,11 @@ def _artifact(tmp_path):
         "demo_aux": {}, "threshold_mu2sigma": 0.5, "threshold_f1": 0.5,
         "metrics": {}, "metrics_f1": {},
         "feature_names": {t: feats[t].feature_names for t in feats},
+        "latent_scatter": {
+            "points": [{"x": 0.1, "y": 0.2, "is_fraud": 0}],
+            "pca_mean": [0.0] * 16,
+            "pca_components": [[1.0] + [0.0] * 15, [0.0, 1.0] + [0.0] * 14],
+        },
     }
     p = tmp_path / "artifacts.pt"
     torch.save(art, p)
@@ -63,6 +68,17 @@ def test_score_known_and_coldstart(tmp_path):
     assert out["verdict"] in ("FRAUD", "NON-FRAUD")
     assert isinstance(out["reconstruction_error"], float)
     assert len(out["top_features"]) >= 1
+
+    # expected-vs-actual detail: one row per continuous txn feature, keys present
+    detail = out["recon_detail"]
+    assert len(detail) == len(scorer.txn_cont_names)
+    d0 = detail[0]
+    assert {"feature", "actual", "reconstructed", "error"} <= d0.keys()
+    assert all(isinstance(d[k], float) for d in detail for k in ("actual", "reconstructed", "error"))
+
+    # latent 2D projection present when the artifact carries PCA params
+    assert "embed_2d" in out and len(out["embed_2d"]) == 2
+    assert all(isinstance(v, float) for v in out["embed_2d"])
 
     rec_new = dict(rec_known, cc_num="ZZZ_new", merchant="ZZZ_newmerch")
     out2 = scorer.score_transaction(rec_new)

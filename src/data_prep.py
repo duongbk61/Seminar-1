@@ -22,6 +22,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import os
+import random
+
 import numpy as np
 import pandas as pd
 
@@ -278,6 +281,100 @@ def _py(v):
     return v
 
 
+def build_viz_graph(df: pd.DataFrame, max_nodes: int = 100, seed: int = 42,
+                    fraud_frac: float = 0.3) -> dict:
+    """Sampled heterogeneous subgraph for the demo's interactive 3D view.
+
+    Samples up to `max_nodes` transactions with fraud OVER-sampled to roughly
+    `fraud_frac` of the total (real fraud is ~0.5%, so a natural sample would
+    show almost none), then adds the customers and merchants they touch. Returns
+    a JSON-serializable dict::
+
+        {"nodes": [{"id","type","is_fraud"?,"raw":{...}}, ...],
+         "links": [{"source","target","relation"}, ...]}
+
+    `raw` holds human-readable fields shown in the hover tooltip. Node ids are
+    namespaced by type ("txn:"/"cust:"/"merch:") so they never collide.
+    """
+    if len(df) == 0:
+        return {"nodes": [], "links": []}
+    rng = np.random.default_rng(seed)
+    n = min(max_nodes, len(df))
+
+    fraud_idx = df.index.values[df["is_fraud"].to_numpy() == 1]
+    gen_idx = df.index.values[df["is_fraud"].to_numpy() == 0]
+    n_fraud = min(len(fraud_idx), int(round(n * fraud_frac)))
+    n_gen = min(len(gen_idx), n - n_fraud)
+    n_fraud = min(len(fraud_idx), n - n_gen)          # backfill if genuine is short
+    pick = np.concatenate([
+        rng.choice(fraud_idx, size=n_fraud, replace=False),
+        rng.choice(gen_idx, size=n_gen, replace=False),
+    ])
+    rng.shuffle(pick)
+    sample = df.loc[pick]
+
+    dist = _haversine_km(
+        pd.to_numeric(sample["lat"], errors="coerce").fillna(0.0).values,
+        pd.to_numeric(sample["long"], errors="coerce").fillna(0.0).values,
+        pd.to_numeric(sample["merch_lat"], errors="coerce").fillna(0.0).values,
+        pd.to_numeric(sample["merch_long"], errors="coerce").fillna(0.0).values,
+    )
+
+    nodes: list[dict] = []
+    links: list[dict] = []
+    seen_cust: set[str] = set()
+    seen_merch: set[str] = set()
+
+    for pos, (_, row) in enumerate(sample.iterrows()):
+        cc = str(row["cc_num"])
+        merch = str(row["merchant"])
+        txn_id = f"txn:{row['trans_num']}"
+        cust_id = f"cust:{cc}"
+        merch_id = f"merch:{merch}"
+
+        nodes.append({
+            "id": txn_id, "type": "transaction", "is_fraud": int(row["is_fraud"]),
+            "raw": {
+                "amt": _py(row.get("amt")),
+                "category": _py(row.get("category")),
+                "datetime": _py(row.get("trans_date_trans_time")),
+                "distance_km": round(float(dist[pos]), 2),
+                "is_fraud": int(row["is_fraud"]),
+                "trans_num": _py(row.get("trans_num")),
+            },
+            # coordinates for the demo's map view (home -> merchant arc)
+            "geo": {
+                "home_lat": float(pd.to_numeric(row.get("lat"), errors="coerce") or 0.0),
+                "home_lon": float(pd.to_numeric(row.get("long"), errors="coerce") or 0.0),
+                "merch_lat": float(pd.to_numeric(row.get("merch_lat"), errors="coerce") or 0.0),
+                "merch_lon": float(pd.to_numeric(row.get("merch_long"), errors="coerce") or 0.0),
+            },
+        })
+        if cust_id not in seen_cust:
+            seen_cust.add(cust_id)
+            nodes.append({
+                "id": cust_id, "type": "customer",
+                "raw": {c: _py(row.get(c)) for c in
+                        ("cc_num", "gender", "dob", "city", "state", "city_pop", "job")
+                        if c in row},
+            })
+        if merch_id not in seen_merch:
+            seen_merch.add(merch_id)
+            nodes.append({
+                "id": merch_id, "type": "merchant",
+                "raw": {
+                    "merchant": merch,
+                    "category": _py(row.get("category")),
+                    "merch_lat": _py(row.get("merch_lat")),
+                    "merch_long": _py(row.get("merch_long")),
+                },
+            })
+        links.append({"source": cust_id, "target": txn_id, "relation": "makes"})
+        links.append({"source": merch_id, "target": txn_id, "relation": "sells"})
+
+    return {"nodes": nodes, "links": links}
+
+
 def build_hetero_data(df: pd.DataFrame, feats: dict):
     """HeteroData with per-type node features; transaction nodes carry labels."""
     import torch
@@ -381,6 +478,63 @@ def compute_data_profile(train_df: pd.DataFrame, test_df: pd.DataFrame,
     return prof
 
 
+def _split_train(df: pd.DataFrame, val_fraction: float, seed: int):
+    """Genuine-only training set; validation = held-out genuine + all train fraud."""
+    genuine = df[df["is_fraud"] == 0]
+    fraud = df[df["is_fraud"] == 1]
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(len(genuine))
+    n_val = int(len(genuine) * val_fraction)
+    val_gen = genuine.iloc[perm[:n_val]]
+    train_gen = genuine.iloc[perm[n_val:]]
+    val_df = pd.concat([val_gen, fraud]).sample(frac=1.0, random_state=seed)
+    return train_gen.reset_index(drop=True), val_df.reset_index(drop=True)
+
+
+def run_training(cfg: Config | None = None) -> dict:
+    cfg = cfg or Config()
+    set_seed(cfg.seed)
+    device = pick_device(cfg.device)
+
+    train_path, test_path = resolve_data_paths(cfg)
+    print(f"[data] train={train_path.name} test={test_path.name}")
+    train_raw = load_raw(train_path, cfg.train_subsample, cfg.keep_all_fraud, cfg.seed)
+    test_raw = load_raw(test_path, cfg.test_subsample, cfg.keep_all_fraud, cfg.seed)
+    print(f"[data] train rows={len(train_raw)} fraud={int(train_raw.is_fraud.sum())} | "
+          f"test rows={len(test_raw)} fraud={int(test_raw.is_fraud.sum())}")
+
+    train_gen, val_df = _split_train(train_raw, cfg.val_fraction, cfg.seed)
+
+
+def set_seed(seed: int = 42) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except ImportError:
+        pass
+
+
+def pick_device(prefer: str = "auto") -> str:
+    """Return 'cuda' when available (e.g. the user's GTX 1650), else 'cpu'."""
+    try:
+        import torch
+
+        if prefer == "cpu":
+            return "cpu"
+        if torch.cuda.is_available():
+            return "cuda"
+    except ImportError:
+        pass
+    return "cpu"
+
+
+
 HETERO_METADATA = (
     ["customer", "merchant", "transaction"],
     [
@@ -390,3 +544,62 @@ HETERO_METADATA = (
         ("transaction", "rev_sells", "merchant"),
     ],
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+OUTPUT_DIR = PROJECT_ROOT / "outputs"
+
+
+class Config:
+    # ----- data files (Kaggle kartik2112/fraud-detection schema) -----
+    train_csv: Path = DATA_DIR / "fraudTrain.csv"
+    test_csv: Path = DATA_DIR / "fraudTest.csv"
+
+    # ----- how many rows to draw from the REAL dataset (override via main.py) -----
+    # Rows kept from the TRAIN file (CPU-friendly). The auto-encoder only learns
+    # from genuine rows, so we keep every fraud row (they go to validation for
+    # threshold selection) plus a genuine pool. None = the full file. CLI: --train-size.
+    train_subsample: int | None = 120_000
+    keep_all_fraud: bool = True
+    # TEST is scored in a single cheap forward pass, so evaluate on the FULL test
+    # set to keep the natural class imbalance (faithful metrics, like the paper).
+    # None = the full file. CLI: --test-size.
+    test_subsample: int | None = None
+
+    # ----- model (paper Table 3) -----
+    hidden_dim: int = 64          # "Size of Hidden Layers" = 64
+    heads: int = 16               # "Number of heads (H)" = 16
+    encoder_layers: int = 2       # FORCED DEVIATION: Table 3 says 124 -> oversmooths
+    decoder_hidden: int = 32      # "Number of Layers for the Decoder" = 64 (width)
+    latent_dim: int = 64          # = hidden_dim; the paper has NO bottleneck
+    dropout: float = 0.4          # "Dropout Rate" = 0.4
+
+    # ----- training tricks (opt-in; off = paper-faithful; see `--small-train`) -----
+    denoise_std: float = 0.0      # >0: add Gaussian noise to encoder inputs, reconstruct clean
+    use_scheduler: bool = False   # ReduceLROnPlateau on val AUC-PR
+    grad_clip: float = 0.0        # >0: clip gradient norm
+    use_layernorm: bool = False   # LayerNorm between HGAEConv layers (fights oversmoothing)
+
+    # ----- optimisation -----
+    lr: float = 2e-3
+    weight_decay: float = 0.01    # "Regularization Rate" = 0.01
+    epochs: int = 150
+    beta: float = 5e-4             # the paper has NO KL term (reconstruction-only)
+    val_fraction: float = 0.15
+    early_stop_patience: int = 25
+
+    seed: int = 42
+    device: str = "cpu"           # no CUDA GPU detected on this machine
+
+    # ----- demo: 3D graph visualization -----
+    # Max transaction nodes sampled into the demo's interactive 3D graph (their
+    # customers/merchants are added on top). Fraud is over-sampled to ~viz_fraud_frac
+    # of the transactions so the genuine/fraud contrast is visible.
+    viz_max_nodes: int = 200
+    viz_fraud_frac: float = 0.2
+
+    output_dir: Path = OUTPUT_DIR
+
+    def __post_init__(self) -> None:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        assert self.hidden_dim % self.heads == 0, "hidden_dim must be divisible by heads"

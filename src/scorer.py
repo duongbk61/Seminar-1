@@ -21,11 +21,13 @@ from .model import HeteroGraphAutoEncoder
 class FraudScorer:
     def __init__(self, model, feats, reference_store, threshold, feature_names,
                  metrics, device="cpu", demo_aux=None,
-                 metrics_f1=None, threshold_f1=None, history=None, data_profile=None):
+                 metrics_f1=None, threshold_f1=None, history=None, data_profile=None,
+                 viz_graph=None, latent_scatter=None):
         self.model = model
         self.feats = feats                      # dict type -> TypeFeaturizer
         self.ref = reference_store
-        self.threshold = float(threshold)
+        self.threshold = float(threshold)          # active decision threshold (mutable)
+        self.threshold_mu2sigma = float(threshold)  # immutable μ+2σ reference (paper Eq. 9)
         self.threshold_f1 = float(threshold_f1) if threshold_f1 is not None else None
         self.feature_names = feature_names      # dict type -> list
         self.metrics = metrics or {}
@@ -34,6 +36,8 @@ class FraudScorer:
         self.demo_aux = demo_aux or {}
         self.history = history or {}            # per-epoch training curves (may be empty for old artifacts)
         self.data_profile = data_profile or {}  # EDA summary of train/test data (may be empty for old artifacts)
+        self.viz_graph = viz_graph or {}        # sampled subgraph for the 3D view (may be empty for old artifacts)
+        self.latent_scatter = latent_scatter or {}  # 2D PCA of embeddings + params (may be empty for old artifacts)
         self.txn_cont_names = feats["transaction"].cont_cols
         self.model.eval()
 
@@ -49,7 +53,8 @@ class FraudScorer:
                    art["feature_names"], art.get("metrics", {}), device,
                    demo_aux=art.get("demo_aux", {}),
                    metrics_f1=art.get("metrics_f1", {}), threshold_f1=art.get("threshold_f1"),
-                   history=art.get("history"), data_profile=art.get("data_profile"))
+                   history=art.get("history"), data_profile=art.get("data_profile"),
+                   viz_graph=art.get("viz_graph"), latent_scatter=art.get("latent_scatter"))
 
     def known_customers(self, limit=None):
         ids = list(self.ref.get("customer", {}).keys())
@@ -79,7 +84,8 @@ class FraudScorer:
         data["transaction", "rev_sells", "merchant"].edge_index = e.clone()
         return data
 
-    def score_transaction(self, record: dict, top_k: int = 5) -> dict:
+    def score_transaction(self, record: dict, top_k: int = 5, threshold: float | None = None) -> dict:
+        thr = self.threshold if threshold is None else float(threshold)
         x_txn = self.feats["transaction"].transform_one(record)
         cust_cold = self.feats["customer"].transform_one(record)
         merch_cold = self.feats["merchant"].transform_one(record)
@@ -88,23 +94,41 @@ class FraudScorer:
 
         data = self._build_single_graph(x_txn, cust_vec, merch_vec)
         error = float(self.model.transaction_scores(data, self.device)[0])
-        feat_err = self.model.transaction_feature_errors(data, self.device)
-        per_feat = np.array([float(feat_err[i][0]) for i in range(len(self.txn_cont_names))])
+        recon = self.model.transaction_reconstruction(data, self.device)
+        n = len(self.txn_cont_names)
+        per_feat = np.array([float(recon[i][2][0]) for i in range(n)])
 
-        is_fraud = error >= self.threshold
+        is_fraud = error >= thr
         order = np.argsort(per_feat)[::-1][:top_k]
         top_features = [
             {"feature": self.txn_cont_names[i], "error": float(per_feat[i]),
              "value": float(x_txn[i])}
             for i in order
         ]
-        return {
+        # per-feature reconstructed-vs-actual (standardized space, model's view)
+        recon_detail = [
+            {"feature": self.txn_cont_names[i],
+             "actual": float(recon[i][1][0]),
+             "reconstructed": float(recon[i][0][0]),
+             "error": float(per_feat[i])}
+            for i in range(n)
+        ]
+        out = {
             "reconstruction_error": error,
-            "threshold": self.threshold,
-            "ratio": error / self.threshold if self.threshold > 0 else float("inf"),
+            "threshold": thr,
+            "ratio": error / thr if thr > 0 else float("inf"),
             "is_fraud": bool(is_fraud),
             "verdict": "FRAUD" if is_fraud else "NON-FRAUD",
             "customer_known": cust_known,
             "merchant_known": merch_known,
             "top_features": top_features,
+            "recon_detail": recon_detail,
         }
+        # project this transaction into the saved 2D latent space (if available)
+        if self.latent_scatter.get("pca_components"):
+            emb = self.model.transaction_embeddings(data, self.device)[0]
+            mean = np.asarray(self.latent_scatter["pca_mean"], dtype=np.float64)
+            comp = np.asarray(self.latent_scatter["pca_components"], dtype=np.float64)
+            xy = (emb.astype(np.float64) - mean) @ comp.T
+            out["embed_2d"] = [float(xy[0]), float(xy[1])]
+        return out
