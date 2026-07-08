@@ -1,0 +1,20 @@
+% Reconstruction-error distributions with anomaly threshold
+\begin{tikzpicture}
+  \begin{axis}[
+      width=9cm,height=5cm,
+      axis lines=left,
+      xlabel={\footnotesize Reconstruction error},
+      ylabel={\footnotesize Density},
+      xtick=\empty,ytick=\empty,
+      ymin=0,ymax=1.25,clip=false,
+      enlarge x limits=0.02]
+    \addplot[draw=mBlue,fill=mBlue!35,domain=0:6,samples=120]{exp(-(x-2)^2/0.5)} \closedcycle;
+    \addplot[draw=mRed,fill=mRed!35,domain=2:9,samples=120]{0.4*exp(-(x-6)^2/1.8)} \closedcycle;
+    \draw[mAccent,very thick,dashed] (axis cs:3.9,0) -- (axis cs:3.9,1.08);
+    \node[mAccent,anchor=south,font=\footnotesize\bfseries] at (axis cs:3.9,1.08) {$\tau=\mu+2\sigma$};
+    \node[mBlue,font=\scriptsize] at (axis cs:1.9,0.6) {Legitimate};
+    \node[mRed,font=\scriptsize] at (axis cs:6.6,0.5) {Fraud};
+    \node[gray!70,font=\tiny,anchor=north] at (axis cs:2.0,-0.02) {predict Non-Fraud};
+    \node[gray!70,font=\tiny,anchor=north] at (axis cs:6.0,-0.02) {predict Fraud};
+  \end{axis}
+\end{tikzpicture}

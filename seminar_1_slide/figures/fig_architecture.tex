@@ -1,0 +1,18 @@
+% HGAE encoder -> latent -> decoder -> anomaly score pipeline
+\begin{tikzpicture}[font=\scriptsize,>=Stealth,node distance=5mm]
+  \node[stage,fill=mBlue!80,minimum width=1.5cm] (g)
+        {Hetero-\\graph\\$G$};
+  \node[stage,fill=mDark,minimum width=2.7cm,right=of g] (e)
+        {\textbf{HGT Encoder}\\[1pt]\tiny type proj.\\\tiny intra-edge attn $\oplus$\\\tiny \textcolor{mAccent}{+ reparam.}};
+  \node[stage,fill=mAccent,minimum width=1.5cm,right=of e] (z)
+        {Latent\\$Z$\\\tiny $\mu,\log\sigma^2$};
+  \node[stage,fill=mDark,minimum width=2.6cm,right=of z] (d)
+        {\textbf{MLP Decoder}\\[1pt]\tiny type heads\\\tiny recon.\ \textbf{attributes}\\\tiny MSE + CE};
+  \node[stage,fill=mRed,minimum width=1.4cm,right=of d] (s)
+        {Recon.\\error\\$\to$ score};
+
+  \draw[->,line width=1.1pt] (g)--(e);
+  \draw[->,line width=1.1pt] (e)--(z);
+  \draw[->,line width=1.1pt] (z)--(d);
+  \draw[->,line width=1.1pt] (d)--(s);
+\end{tikzpicture}

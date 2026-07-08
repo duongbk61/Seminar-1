@@ -1,0 +1,11 @@
+% Three-phase train / calibrate / infer pipeline
+\begin{tikzpicture}[font=\normalsize,>=Stealth,node distance=8mm]
+  \node[stage,fill=mDark,minimum width=3.6cm,minimum height=2.6cm] (p1)
+        {\large\textbf{1. Train}\\[4pt]\footnotesize see ONLY legitimate\\\footnotesize reconstruct normal\\[2pt]\textcolor{mAccent}{\footnotesize min $L$ (MSE+CE)}};
+  \node[stage,fill=mBlue,minimum width=3.6cm,minimum height=2.6cm,right=of p1] (p2)
+        {\large\textbf{2. Calibrate}\\[4pt]\footnotesize held-out legit errors\\[2pt]\normalsize$\tau=\mu+2\sigma$\\\footnotesize $\approx 95\%$ interval};
+  \node[stage,fill=mGreen,minimum width=3.6cm,minimum height=2.6cm,right=of p2] (p3)
+        {\large\textbf{3. Infer}\\[4pt]\footnotesize frozen network\\\footnotesize err $<\tau\Rightarrow$ Non-Fraud\\\footnotesize err $>\tau\Rightarrow$ \textbf{Fraud}};
+  \draw[->,line width=2pt,mAccent] (p1)--(p2);
+  \draw[->,line width=2pt,mAccent] (p2)--(p3);
+\end{tikzpicture}

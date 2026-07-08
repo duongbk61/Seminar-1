@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -203,7 +202,9 @@ def run_training(cfg: Config | None = None) -> dict:
                                           cfg.viz_fraud_frac)
     latent_scatter = _compute_latent_scatter(model, feats, train_raw, device,
                                              seed=cfg.seed, fraud_frac=cfg.viz_fraud_frac)
-    data_profile = data_prep.compute_data_profile(train_raw, test_raw)
+    # EDA panel: profile the FULL files (4 columns only), not the training subsample
+    data_profile = data_prep.compute_data_profile(
+        data_prep.load_profile_frame(train_path), data_prep.load_profile_frame(test_path))
 
     model_kwargs = dict(metadata=metadata, in_dims=in_dims, type_targets=type_targets,
                         hidden_dim=cfg.hidden_dim, heads=cfg.heads,

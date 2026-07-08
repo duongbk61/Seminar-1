@@ -1,0 +1,15 @@
+% Evolution / lineage timeline of graph representation learning
+\begin{tikzpicture}[font=\scriptsize]
+  \draw[line width=1.6pt,mDark!70] (0,0) -- (12.2,0);
+  \foreach \x/\c/\t/\b in {%
+      0.7/mBlue/{GCN \& GraphSAGE}/{message passing},
+      3.1/mBlue/{GAT}/{learned attention},
+      5.4/mAccent/{GAE \& VGAE}/{self-supervised},
+      7.7/mGreen/{HGT \& GEM}/{heterogeneous},
+      9.9/mRed/{\textbf{HGAE} (2025)}/{our case study},
+      11.9/mPurple/{MGAE \& lrGAE}/{masked + contrastive}}{%
+    \fill[\c] (\x,0) circle (3.2pt);
+    \node[\c,align=center,anchor=south] at (\x,0.18) {\textbf{\t}};
+    \node[gray!75,align=center,anchor=north] at (\x,-0.18) {\b};
+  }
+\end{tikzpicture}

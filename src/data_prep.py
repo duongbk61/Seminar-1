@@ -4,11 +4,10 @@ Design goals
 ------------
 * Every transaction feature is computable from a SINGLE raw record, so the exact
   same featuriser is reused at inference time (the Streamlit demo).
-* Customer / merchant node features = the mean of the feature vectors of the
-  transactions attached to them. This keeps all node types in the same feature
-  space (no extra scalers), is inductive, and makes "cold-start" trivial: a brand
-  new customer/merchant just inherits the feature vector of the incoming
-  transaction.
+* Customer / merchant node features come from that entity's own attributes on a
+  single representative row (demographics / category + location), so a brand new
+  customer or merchant can be featurised straight from the incoming transaction
+  record ("cold-start").
 
 Heterogeneous graph (paper Section 3): three node types, each with its own
 attribute set (per-type featurizers):
@@ -21,9 +20,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-
-import os
-import random
 
 import numpy as np
 import pandas as pd
@@ -219,16 +215,6 @@ def type_targets_from_featurizers(feats: dict) -> dict:
 # --------------------------------------------------------------------------- #
 # helper for graph construction & demo
 # --------------------------------------------------------------------------- #
-def _mean_by_group(X: np.ndarray, group_idx: np.ndarray, n_groups: int) -> np.ndarray:
-    F = X.shape[1]
-    sums = np.zeros((n_groups, F), dtype=np.float64)
-    counts = np.zeros(n_groups, dtype=np.float64)
-    np.add.at(sums, group_idx, X)
-    np.add.at(counts, group_idx, 1.0)
-    counts[counts == 0] = 1.0
-    return (sums / counts[:, None]).astype(np.float32)
-
-
 def build_demo_aux(train_df: pd.DataFrame, test_df: pd.DataFrame,
                    n_customers: int = 300, n_merchants: int = 200,
                    n_examples: int = 25, seed: int = 42) -> dict:
@@ -433,14 +419,27 @@ def compute_reference_store(df_genuine: pd.DataFrame, feats: dict) -> dict:
     return out
 
 
+PROFILE_COLS = ["trans_date_trans_time", "cc_num", "merchant", "category", "amt",
+                "dob", "lat", "long", "merch_lat", "merch_long", "is_fraud"]
+
+
+def load_profile_frame(path: Path) -> pd.DataFrame:
+    """Load ONLY the columns `compute_data_profile` needs, for the FULL file.
+
+    Reading a handful of columns keeps this cheap even for the 1.3M-row train
+    file, so the demo's EDA panel can show the true full-dataset statistics
+    even when training itself ran on a subsample.
+    """
+    return pd.read_csv(path, usecols=PROFILE_COLS)
+
+
 def compute_data_profile(train_df: pd.DataFrame, test_df: pd.DataFrame,
                          n_top_cat: int = 12, n_bins: int = 40) -> dict:
     """Compact EDA summary saved with the model so the demo can chart the data
     characteristics without re-reading the raw CSVs. All values are small lists.
 
-    NOTE: counts reflect the rows actually loaded for train/eval (fraud is always
-    kept, so the training class balance is intentionally inflated vs. the full
-    file). Distribution *shapes* are still representative.
+    Pass frames from `load_profile_frame` so counts/rates describe the FULL
+    dataset, independent of any training subsample.
     """
     def _counts(df):
         f = int((df["is_fraud"] == 1).sum())
@@ -461,11 +460,61 @@ def compute_data_profile(train_df: pd.DataFrame, test_df: pd.DataFrame,
                             "genuine": [int(x) for x in g], "fraud": [int(x) for x in fr]}
 
     # fraud rate + volume by hour of day (train)
-    hour = pd.to_datetime(train_df["trans_date_trans_time"], errors="coerce").dt.hour.fillna(12).astype(int)
+    ts = pd.to_datetime(train_df["trans_date_trans_time"], errors="coerce")
+    hour = ts.dt.hour.fillna(12).astype(int)
     byh = (pd.DataFrame({"hour": hour, "is_fraud": y})
            .groupby("hour")["is_fraud"].agg(["mean", "size"]).reindex(range(24), fill_value=0))
     prof["hour"] = {"rate": [float(x) for x in byh["mean"]],
                     "count": [int(x) for x in byh["size"]]}
+
+    # fraud rate on the hour x weekday grid (rows = Mon..Sun, cols = 0..23)
+    dow = ts.dt.dayofweek.fillna(0).astype(int)
+    grid = (pd.DataFrame({"dow": dow, "hour": hour, "is_fraud": y})
+            .groupby(["dow", "hour"])["is_fraud"].agg(["mean", "size"]))
+    rate_g = grid["mean"].unstack(fill_value=0.0).reindex(index=range(7), columns=range(24), fill_value=0.0)
+    cnt_g = grid["size"].unstack(fill_value=0).reindex(index=range(7), columns=range(24), fill_value=0)
+    prof["hour_dow"] = {"rate": [[float(v) for v in row] for row in rate_g.to_numpy()],
+                        "count": [[int(v) for v in row] for row in cnt_g.to_numpy()]}
+
+    # fraud rate by amount band (raw dollars, fixed bands so labels read naturally)
+    amt_raw = pd.to_numeric(train_df["amt"], errors="coerce").fillna(0.0)
+    amt_edges = [0, 5, 10, 20, 50, 100, 200, 300, 500, 700, 1000, 1500, np.inf]
+    amt_labels = ["$0-5", "$5-10", "$10-20", "$20-50", "$50-100", "$100-200",
+                  "$200-300", "$300-500", "$500-700", "$700-1000", "$1000-1500", "$1500+"]
+    band = pd.cut(amt_raw, bins=amt_edges, labels=amt_labels, right=False)
+    byb = (pd.DataFrame({"band": band, "is_fraud": y})
+           .groupby("band", observed=False)["is_fraud"].agg(["mean", "size"]).reindex(amt_labels))
+    prof["amt_rate"] = {"labels": amt_labels,
+                        "rate": [float(x) if np.isfinite(x) else 0.0 for x in byb["mean"]],
+                        "count": [int(x) for x in byb["size"]]}
+
+    # fraud rate by customer age band (age at transaction time, from dob)
+    dob = pd.to_datetime(train_df["dob"], errors="coerce")
+    age = (ts.dt.year - dob.dt.year).fillna(40).clip(0, 120)
+    age_edges = [0, 25, 35, 45, 55, 65, 75, 121]
+    age_labels = ["<25", "25-34", "35-44", "45-54", "55-64", "65-74", "75+"]
+    aband = pd.cut(age, bins=age_edges, labels=age_labels, right=False)
+    bya = (pd.DataFrame({"band": aband, "is_fraud": y})
+           .groupby("band", observed=False)["is_fraud"].agg(["mean", "size"]).reindex(age_labels))
+    prof["age"] = {"labels": age_labels,
+                   "rate": [float(x) if np.isfinite(x) else 0.0 for x in bya["mean"]],
+                   "count": [int(x) for x in bya["size"]]}
+
+    # fraud rate by home->merchant distance band (the model's log_distance feature)
+    dist = _haversine_km(
+        pd.to_numeric(train_df["lat"], errors="coerce").fillna(0.0).values,
+        pd.to_numeric(train_df["long"], errors="coerce").fillna(0.0).values,
+        pd.to_numeric(train_df["merch_lat"], errors="coerce").fillna(0.0).values,
+        pd.to_numeric(train_df["merch_long"], errors="coerce").fillna(0.0).values,
+    )
+    dist_edges = [0, 20, 40, 60, 80, 100, 120, np.inf]
+    dist_labels = ["0-20", "20-40", "40-60", "60-80", "80-100", "100-120", "120+"]
+    dband = pd.cut(pd.Series(dist), bins=dist_edges, labels=dist_labels, right=False)
+    byd = (pd.DataFrame({"band": dband, "is_fraud": y})
+           .groupby("band", observed=False)["is_fraud"].agg(["mean", "size"]).reindex(dist_labels))
+    prof["distance"] = {"labels": dist_labels,
+                        "rate": [float(x) if np.isfinite(x) else 0.0 for x in byd["mean"]],
+                        "count": [int(x) for x in byd["size"]]}
 
     # fraud rate by merchant category (top categories by volume, train)
     cat = train_df["category"].astype(str)
@@ -475,64 +524,32 @@ def compute_data_profile(train_df: pd.DataFrame, test_df: pd.DataFrame,
     prof["category"] = {"labels": [str(c) for c in top],
                         "rate": [float(x) for x in grp["mean"]],
                         "count": [int(x) for x in grp["size"]]}
+
+    # fraud concentration per entity: WHY the customer/merchant graph helps
+    cust = train_df["cc_num"].astype(str)
+    merch = train_df["merchant"].astype(str).str.replace("fraud_", "", regex=False)
+    fraud_mask = y == 1
+    n_fraud = int(fraud_mask.sum())
+    top_m = merch[fraud_mask].value_counts().head(10)
+    merch_totals = merch.value_counts()
+    victims = cust[fraud_mask].value_counts()          # fraud txns per victim card
+    vdist = victims.clip(upper=10).value_counts().reindex(range(1, 11), fill_value=0)
+    prof["entity"] = {
+        "n_customers": int(cust.nunique()),
+        "n_merchants": int(merch.nunique()),
+        "txn_per_customer_median": float(cust.value_counts().median()),
+        "txn_per_merchant_median": float(merch_totals.median()),
+        "top_merchants": {
+            "labels": [str(m) for m in top_m.index],
+            "fraud": [int(v) for v in top_m.to_numpy()],
+            "rate": [float(top_m[m] / merch_totals[m]) for m in top_m.index],
+        },
+        "fraud_share_top_merchants": float(top_m.sum() / n_fraud) if n_fraud else 0.0,
+        "victim_cards": int(len(victims)),
+        "fraud_per_victim": {"labels": [str(i) for i in range(1, 10)] + ["10+"],
+                             "cards": [int(v) for v in vdist.to_numpy()]},
+    }
     return prof
-
-
-def _split_train(df: pd.DataFrame, val_fraction: float, seed: int):
-    """Genuine-only training set; validation = held-out genuine + all train fraud."""
-    genuine = df[df["is_fraud"] == 0]
-    fraud = df[df["is_fraud"] == 1]
-    rng = np.random.default_rng(seed)
-    perm = rng.permutation(len(genuine))
-    n_val = int(len(genuine) * val_fraction)
-    val_gen = genuine.iloc[perm[:n_val]]
-    train_gen = genuine.iloc[perm[n_val:]]
-    val_df = pd.concat([val_gen, fraud]).sample(frac=1.0, random_state=seed)
-    return train_gen.reset_index(drop=True), val_df.reset_index(drop=True)
-
-
-def run_training(cfg: Config | None = None) -> dict:
-    cfg = cfg or Config()
-    set_seed(cfg.seed)
-    device = pick_device(cfg.device)
-
-    train_path, test_path = resolve_data_paths(cfg)
-    print(f"[data] train={train_path.name} test={test_path.name}")
-    train_raw = load_raw(train_path, cfg.train_subsample, cfg.keep_all_fraud, cfg.seed)
-    test_raw = load_raw(test_path, cfg.test_subsample, cfg.keep_all_fraud, cfg.seed)
-    print(f"[data] train rows={len(train_raw)} fraud={int(train_raw.is_fraud.sum())} | "
-          f"test rows={len(test_raw)} fraud={int(test_raw.is_fraud.sum())}")
-
-    train_gen, val_df = _split_train(train_raw, cfg.val_fraction, cfg.seed)
-
-
-def set_seed(seed: int = 42) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    try:
-        import torch
-
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-    except ImportError:
-        pass
-
-
-def pick_device(prefer: str = "auto") -> str:
-    """Return 'cuda' when available (e.g. the user's GTX 1650), else 'cpu'."""
-    try:
-        import torch
-
-        if prefer == "cpu":
-            return "cpu"
-        if torch.cuda.is_available():
-            return "cuda"
-    except ImportError:
-        pass
-    return "cpu"
-
 
 
 HETERO_METADATA = (
@@ -544,62 +561,3 @@ HETERO_METADATA = (
         ("transaction", "rev_sells", "merchant"),
     ],
 )
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
-OUTPUT_DIR = PROJECT_ROOT / "outputs"
-
-
-class Config:
-    # ----- data files (Kaggle kartik2112/fraud-detection schema) -----
-    train_csv: Path = DATA_DIR / "fraudTrain.csv"
-    test_csv: Path = DATA_DIR / "fraudTest.csv"
-
-    # ----- how many rows to draw from the REAL dataset (override via main.py) -----
-    # Rows kept from the TRAIN file (CPU-friendly). The auto-encoder only learns
-    # from genuine rows, so we keep every fraud row (they go to validation for
-    # threshold selection) plus a genuine pool. None = the full file. CLI: --train-size.
-    train_subsample: int | None = 120_000
-    keep_all_fraud: bool = True
-    # TEST is scored in a single cheap forward pass, so evaluate on the FULL test
-    # set to keep the natural class imbalance (faithful metrics, like the paper).
-    # None = the full file. CLI: --test-size.
-    test_subsample: int | None = None
-
-    # ----- model (paper Table 3) -----
-    hidden_dim: int = 64          # "Size of Hidden Layers" = 64
-    heads: int = 16               # "Number of heads (H)" = 16
-    encoder_layers: int = 2       # FORCED DEVIATION: Table 3 says 124 -> oversmooths
-    decoder_hidden: int = 32      # "Number of Layers for the Decoder" = 64 (width)
-    latent_dim: int = 64          # = hidden_dim; the paper has NO bottleneck
-    dropout: float = 0.4          # "Dropout Rate" = 0.4
-
-    # ----- training tricks (opt-in; off = paper-faithful; see `--small-train`) -----
-    denoise_std: float = 0.0      # >0: add Gaussian noise to encoder inputs, reconstruct clean
-    use_scheduler: bool = False   # ReduceLROnPlateau on val AUC-PR
-    grad_clip: float = 0.0        # >0: clip gradient norm
-    use_layernorm: bool = False   # LayerNorm between HGAEConv layers (fights oversmoothing)
-
-    # ----- optimisation -----
-    lr: float = 2e-3
-    weight_decay: float = 0.01    # "Regularization Rate" = 0.01
-    epochs: int = 150
-    beta: float = 5e-4             # the paper has NO KL term (reconstruction-only)
-    val_fraction: float = 0.15
-    early_stop_patience: int = 25
-
-    seed: int = 42
-    device: str = "cpu"           # no CUDA GPU detected on this machine
-
-    # ----- demo: 3D graph visualization -----
-    # Max transaction nodes sampled into the demo's interactive 3D graph (their
-    # customers/merchants are added on top). Fraud is over-sampled to ~viz_fraud_frac
-    # of the transactions so the genuine/fraud contrast is visible.
-    viz_max_nodes: int = 200
-    viz_fraud_frac: float = 0.2
-
-    output_dir: Path = OUTPUT_DIR
-
-    def __post_init__(self) -> None:
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        assert self.hidden_dim % self.heads == 0, "hidden_dim must be divisible by heads"

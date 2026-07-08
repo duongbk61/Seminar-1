@@ -15,7 +15,7 @@ NO KL term, NO latent bottleneck (latent = hidden).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -33,18 +33,18 @@ class Config:
     # Rows kept from the TRAIN file (CPU-friendly). The auto-encoder only learns
     # from genuine rows, so we keep every fraud row (they go to validation for
     # threshold selection) plus a genuine pool. None = the full file. CLI: --train-size.
-    train_subsample: int | None = 120_000
+    train_subsample: int | None = 200_000
     keep_all_fraud: bool = True
     # TEST is scored in a single cheap forward pass, so evaluate on the FULL test
     # set to keep the natural class imbalance (faithful metrics, like the paper).
     # None = the full file. CLI: --test-size.
-    test_subsample: int | None = None
+    test_subsample: int | None = 100_000
 
     # ----- model (paper Table 3) -----
     hidden_dim: int = 64          # "Size of Hidden Layers" = 64
     heads: int = 16               # "Number of heads (H)" = 16
     encoder_layers: int = 2       # FORCED DEVIATION: Table 3 says 124 -> oversmooths
-    decoder_hidden: int = 32      # "Number of Layers for the Decoder" = 64 (width)
+    decoder_hidden: int = 32      # paper Table 3 says 64 (width); halved in c1b806f
     latent_dim: int = 64          # = hidden_dim; the paper has NO bottleneck
     dropout: float = 0.4          # "Dropout Rate" = 0.4
 
@@ -58,7 +58,6 @@ class Config:
     lr: float = 2e-3
     weight_decay: float = 0.01    # "Regularization Rate" = 0.01
     epochs: int = 150
-    beta: float = 5e-4             # the paper has NO KL term (reconstruction-only)
     val_fraction: float = 0.15
     early_stop_patience: int = 25
 
@@ -69,7 +68,7 @@ class Config:
     # Max transaction nodes sampled into the demo's interactive 3D graph (their
     # customers/merchants are added on top). Fraud is over-sampled to ~viz_fraud_frac
     # of the transactions so the genuine/fraud contrast is visible.
-    viz_max_nodes: int = 200
+    viz_max_nodes: int = 100
     viz_fraud_frac: float = 0.2
 
     output_dir: Path = OUTPUT_DIR

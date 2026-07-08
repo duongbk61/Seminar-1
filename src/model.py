@@ -105,18 +105,6 @@ class HeteroGraphAutoEncoder(nn.Module):
         return err.cpu()
 
     @torch.no_grad()
-    def transaction_feature_errors(self, data, device="cpu") -> dict:
-        """Per continuous-feature squared error for transactions (demo 'why')."""
-        self.eval()
-        data = data.to(device)
-        recon, _, _ = self.forward(data.x_dict, data.edge_index_dict)
-        t = "transaction"
-        x = data[t].x
-        n_cont = self.type_targets[t]["cont"]
-        sq = (recon[t]["cont"] - x[:, :n_cont]) ** 2
-        return {i: sq[:, i].cpu() for i in range(n_cont)}
-
-    @torch.no_grad()
     def transaction_embeddings(self, data, device="cpu"):
         """Latent embeddings (mu) for transaction nodes — powers the 2D scatter."""
         self.eval()

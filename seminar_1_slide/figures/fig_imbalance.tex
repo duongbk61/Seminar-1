@@ -1,0 +1,26 @@
+% Class-imbalance pie chart (true proportions: the tiny fraud sliver IS the point)
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[font=\footnotesize,>=Stealth]
+  \def\R{2}
+  % Legitimate slice (steel) -- 99.47%, sweeps 358.1 deg clockwise from 88.1 to -270
+  \fill[mBlue] (0,0) -- (88.1:\R) arc[start angle=88.1, end angle=-270, radius=\R] -- cycle;
+  % Fraud slice (red) -- 0.53% (~1.9 deg), slightly exploded along its bisector
+  \begin{scope}[shift={(89.05:0.20)}]
+    \fill[mRed] (0,0) -- (90:\R) arc[start angle=90, end angle=88.1, radius=\R] -- cycle;
+  \end{scope}
+  \draw[white,line width=1pt] (0,0) circle (\R);
+
+  % Legitimate label (inside)
+  \node[white,align=center] at (0,-0.8)
+        {\textbf{Legitimate}\\[-2pt]\scriptsize 1{,}800{,}000\\[-2pt]\scriptsize 99.47\%};
+
+  % Fraud leader + label
+  \draw[mRed,thick,->] (0.08,\R+0.06) to[out=75,in=168] (2.05,1.55);
+  \node[anchor=west,mRed,align=left] at (2.05,1.5)
+        {\textbf{Fraud}\\[-2pt]\scriptsize 9{,}600\\[-2pt]\scriptsize 0.53\%};
+
+  % Imbalance ratio (key number -> orange)
+  \node[anchor=west,draw=mOrange,line width=1.2pt,rounded corners=4pt,inner sep=6pt,
+        text=mOrange,font=\large\bfseries] at (2.05,-0.7) {188 : 1};
+\end{tikzpicture}%
+}

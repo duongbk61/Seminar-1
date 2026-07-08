@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .data_prep import TypeFeaturizer, HETERO_METADATA
+from .data_prep import TypeFeaturizer
 from .model import HeteroGraphAutoEncoder
 
 

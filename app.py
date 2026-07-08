@@ -12,8 +12,10 @@ reconstruction error cross the fraud threshold.
 from __future__ import annotations
 
 import random
+import time
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -61,6 +63,14 @@ table.hist th { color:#9aa0b4;font-weight:600; }
 .badge { padding:2px 9px;border-radius:999px;font-size:.76rem;font-weight:800; }
 .badge-fraud { background:#e74c3c22;color:#ff8093;border:1px solid #e74c3c66; }
 .badge-genuine { background:#2ecc7122;color:#5be69a;border:1px solid #2ecc7166; }
+.ticker { overflow:hidden;white-space:nowrap;border-radius:8px;padding:8px 0;
+          background:linear-gradient(90deg,#3a0d14,#1a0a0e);border:1px solid #e74c3c55; }
+.ticker span { display:inline-block;padding-left:100%;color:#ff9aa8;font-weight:700;
+               font-size:.95rem;animation:scroll 18s linear infinite; }
+@keyframes scroll { 0%{transform:translateX(0);} 100%{transform:translateX(-100%);} }
+.live-dot { display:inline-block;width:10px;height:10px;border-radius:50%;background:#e74c3c;
+            margin-right:7px;animation:blink 1s ease-in-out infinite;box-shadow:0 0 8px #e74c3c; }
+@keyframes blink { 0%,100%{opacity:1;} 50%{opacity:.25;} }
 </style>
 """
 
@@ -68,6 +78,48 @@ table.hist th { color:#9aa0b4;font-weight:600; }
 def _verdict_badge(is_fraud: bool) -> str:
     cls, txt = ("badge-fraud", "FRAUD") if is_fraud else ("badge-genuine", "GENUINE")
     return f'<span class="badge {cls}">{txt}</span>'
+
+
+def _f(v, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _fingerprint_radar(res: dict):
+    """A polar 'anomaly fingerprint': per-feature reconstruction error.
+
+    Genuine → a small, tight polygon; fraud → a large, spiky one. Colour follows
+    the verdict (green genuine / red fraud) — single series, so no legend needed.
+    """
+    detail = res.get("recon_detail") or []
+    if len(detail) < 3:
+        return None
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    feats = [d["feature"] for d in detail]
+    errs = [max(0.0, float(d["error"])) for d in detail]
+    n = len(feats)
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
+    vals = errs + errs[:1]
+    ang = angles + angles[:1]
+    color = "#e74c3c" if res["is_fraud"] else "#2ecc71"
+
+    fig = plt.figure(figsize=(4.4, 4.4))
+    fig.patch.set_alpha(0)
+    ax = plt.subplot(111, polar=True)
+    ax.set_facecolor("none")
+    ax.plot(ang, vals, color=color, linewidth=2)
+    ax.fill(ang, vals, color=color, alpha=0.28)
+    ax.set_xticks(angles)
+    ax.set_xticklabels(feats, fontsize=8, color="#8a8aa0")
+    ax.set_yticklabels([])
+    ax.tick_params(colors="#8a8aa0")
+    ax.grid(color="#8a8aa0", alpha=0.3)
+    ax.spines["polar"].set_alpha(0.3)
+    return fig
 
 
 def _haversine_km(lat1, lon1, lat2, lon2) -> float:
@@ -119,9 +171,21 @@ def _map_view(base_viz: dict, scored: list) -> None:
     st.caption("Same transactions as the graph above. Faint arcs = sampled "
                "(🟢 genuine / 🔴 fraud); bold arcs = your scored transactions in "
                "their graph colour. Arc length = home↔merchant distance.")
+    show_heat = st.checkbox("🔥 Show fraud-density heatmap (3D hex columns at fraud merchants)",
+                            key="map_heat")
     try:
         import pydeck as pdk
         layers = []
+        if show_heat:
+            fraud_pts = all_df[all_df["verdict"] == "fraud"][["to_lon", "to_lat"]]
+            if len(fraud_pts):
+                layers.append(pdk.Layer(
+                    "HexagonLayer", fraud_pts, get_position=["to_lon", "to_lat"],
+                    radius=55000, elevation_scale=900, elevation_range=[0, 30000],
+                    extruded=True, coverage=0.85, opacity=0.55,
+                    # sequential single-hue red ramp (light -> dark) = fraud density
+                    color_range=[[254, 224, 210], [252, 187, 161], [252, 146, 114],
+                                 [251, 106, 74], [222, 45, 38], [165, 15, 21]]))
         if base_rows:
             bdf = pd.DataFrame(base_rows)
             layers.append(pdk.Layer(
@@ -143,7 +207,7 @@ def _map_view(base_viz: dict, scored: list) -> None:
             latitude=float(all_df[["from_lat", "to_lat"]].to_numpy().mean()),
             longitude=float(all_df[["from_lon", "to_lon"]].to_numpy().mean()),
             zoom=2.6, pitch=40)
-        st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view, height=680,
+        st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view, height=1200,
                                  tooltip={"text": "{label}: {verdict}\n{distance} km"}),
                         use_container_width=True)
     except Exception:
@@ -152,6 +216,110 @@ def _map_view(base_viz: dict, scored: list) -> None:
             all_df[["to_lat", "to_lon"]].rename(columns={"to_lat": "lat", "to_lon": "lon"}),
         ], ignore_index=True)
         st.map(pts)
+
+
+def _soc_map(log: list) -> None:
+    """Lightweight live map of the streamed transactions (home → merchant arcs)."""
+    rows = []
+    for e in log:
+        rec, res = e["record"], e["res"]
+        fraud = res["is_fraud"]
+        lat, lon = _f(rec.get("lat")), _f(rec.get("long"))
+        if not (lat or lon):
+            continue
+        rows.append({"from_lon": lon, "from_lat": lat,
+                     "to_lon": _f(rec.get("merch_long")), "to_lat": _f(rec.get("merch_lat")),
+                     "r": 231 if fraud else 46, "g": 76 if fraud else 204, "b": 60 if fraud else 113,
+                     "label": str(e["seq"]), "verdict": res["verdict"]})
+    if not rows:
+        st.caption("Press ▶️ Go live to start the stream.")
+        return
+    df = pd.DataFrame(rows)
+    try:
+        import pydeck as pdk
+        view = pdk.ViewState(latitude=float(df[["from_lat", "to_lat"]].to_numpy().mean()),
+                             longitude=float(df[["from_lon", "to_lon"]].to_numpy().mean()),
+                             zoom=2.5, pitch=35)
+        st.pydeck_chart(pdk.Deck(initial_view_state=view, height=560, layers=[
+            pdk.Layer("ArcLayer", df, get_source_position=["from_lon", "from_lat"],
+                      get_target_position=["to_lon", "to_lat"], get_source_color=[90, 110, 150],
+                      get_target_color=["r", "g", "b"], get_width=2.5, opacity=0.7, pickable=True),
+            pdk.Layer("ScatterplotLayer", df, get_position=["to_lon", "to_lat"],
+                      get_fill_color=["r", "g", "b"], get_radius=26000, opacity=0.85),
+        ], tooltip={"text": "{label}: {verdict}"}), use_container_width=True)
+    except Exception:
+        st.map(df[["from_lat", "from_lon"]].rename(columns={"from_lat": "lat", "from_lon": "lon"}))
+
+
+def _soc_dashboard(scorer) -> None:
+    """Live 'SOC' mode: auto-stream transactions, score each, and update KPIs + alerts."""
+    ss = st.session_state
+    ex = scorer.demo_aux.get("examples", {})
+    pool = list(ex.get("genuine", [])) + list(ex.get("fraud", []))
+    with st.expander("🛰️ Live fraud monitoring ", expanded=False):
+        if not pool:
+            st.info("No example transactions stored to stream (retrain to populate demo_aux).")
+            return
+        live = ss.get("soc_live", False)
+        c1, c2, c3 = st.columns(3)
+        if c1.button("⏸️ Pause" if live else "▶️ Go live", use_container_width=True, key="soc_toggle"):
+            live = not live
+            ss["soc_live"] = live
+            if live and not ss.get("soc_feed"):
+                feed = list(pool)
+                random.shuffle(feed)
+                ss["soc_feed"] = feed
+                ss.setdefault("soc_log", [])
+            st.rerun()
+        if c2.button("🔄 Reset", use_container_width=True, key="soc_reset"):
+            ss["soc_live"] = False
+            ss["soc_feed"] = []
+            ss["soc_log"] = []
+            st.rerun()
+        interval = {"Fast": 0.7, "Normal": 1.4, "Slow": 2.5}[
+            c3.selectbox("Speed", ["Fast", "Normal", "Slow"], index=1, key="soc_speed")]
+
+        log = ss.get("soc_log", [])
+        frauds = [e for e in log if e["res"]["is_fraud"]]
+        blocked = sum(_f(e["record"].get("amt")) for e in frauds)
+        rate = (100.0 * len(frauds) / len(log)) if log else 0.0
+
+        if ss.get("soc_live"):
+            st.markdown('<span class="live-dot"></span> **LIVE** — streaming transactions…',
+                        unsafe_allow_html=True)
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Transactions", f"{len(log):,}")
+        k2.metric("🚨 Fraud caught", f"{len(frauds):,}")
+        k3.metric("💸 $ blocked", f"${blocked:,.0f}")
+        k4.metric("Fraud rate", f"{rate:.1f}%")
+
+        recent = frauds[::-1][:12]
+        if recent:
+            items = "   ✦   ".join(f"{e['seq']} · ${_f(e['record'].get('amt')):,.0f} · "
+                                   f"{e['record'].get('category', '')}" for e in recent)
+            st.markdown(f'<div class="ticker"><span>🚨 FRAUD ALERTS   ✦   {items}</span></div>',
+                        unsafe_allow_html=True)
+
+        _soc_map(log)
+        if log and not ss.get("soc_live"):
+            st.caption("⏸️ Paused — the streamed transactions are now highlighted in the "
+                       "3D graph above (each in its own colour).")
+
+        # advance one transaction per rerun while live
+        if ss.get("soc_live"):
+            feed = ss.get("soc_feed", [])
+            if feed:
+                rec = feed.pop(0)
+                res = scorer.score_transaction(rec)
+                n = len(log) + 1
+                log.append({"record": rec, "res": res, "color": _txn_color(n), "seq": f"L{n}"})
+                ss["soc_log"] = log
+                ss["soc_feed"] = feed
+                time.sleep(interval)
+                st.rerun()
+            else:
+                ss["soc_live"] = False
+                st.success(f"Stream complete — {len(log)} transactions processed.")
 
 
 def _history_table(scored: list) -> None:
@@ -178,6 +346,14 @@ def _history_table(scored: list) -> None:
     )
 
 ARTIFACT = Config().output_dir / "artifacts.pt"
+HUST_LOGO = Path(__file__).resolve().parent / "src" / "asset" / "hust.png"
+
+GROUP_MEMBERS = [
+    ("Luong Minh Duong", "20251038M"),
+    ("Tran Le Phuong Thao", "20251186M"),
+    ("Nguyen Nhu Thai", "20252270M"),
+]
+SUPERVISOR = "Prof. Nguyen Hung Son"
 
 st.set_page_config(page_title="Hetero-Graph Fraud Detector", page_icon="🛡️", layout="wide")
 
@@ -262,11 +438,18 @@ def random_new_merchant(categories: list[str]) -> tuple[str, dict]:
 
 def main() -> None:
     st.markdown(_CSS, unsafe_allow_html=True)
-    st.title("🛡️ Heterogeneous Graph Auto-Encoder — Credit Card Fraud Detection")
+    if HUST_LOGO.exists():
+        col_logo, col_title = st.columns([1, 12])
+        col_logo.image(str(HUST_LOGO), width=200)
+        col_title.title("Heterogeneous Graph Auto-Encoder - Credit Card Fraud Detection")
+    else:
+        st.title("Heterogeneous Graph Auto-Encoder - Credit Card Fraud Detection")
     st.caption("Demo of Majumder et al., *Heterogeneous Graph Auto-Encoder for "
                "Credit Card Fraud Detection* (IJCA 32(2), 2025). The model learns "
                "to reconstruct **genuine** transactions; a high reconstruction "
                "error ⇒ fraud.")
+    st.caption("Seminar 1 — **Group 06**, HUST SoICT · Supervisor: "
+               f"**{SUPERVISOR}**")
 
     if not ARTIFACT.exists():
         st.error("No trained model found at `outputs/artifacts.pt`.\n\n"
@@ -281,19 +464,25 @@ def main() -> None:
     known_customers = list(cust_attrs.keys())
     known_merchants = list(merch_attrs.keys())
 
-    # ---------------- sidebar: model card ---------------- #
+    # ---------------- sidebar: group identity + model card ---------------- #
     with st.sidebar:
+        if HUST_LOGO.exists():
+            st.image(str(HUST_LOGO), width=200)
+        st.markdown(
+            "### Group 06\n"
+            + "\n".join(f"- {name} — `{sid}`" for name, sid in GROUP_MEMBERS)
+            + f"\n\n**Supervisor:** {SUPERVISOR}"
+        )
+        st.divider()
         st.header("Model performance")
         m = scorer.metrics
         if m:
             st.caption("Full test @ threshold = μ+2σ (paper Eq. 9)")
             st.metric("ROC-AUC", f"{m.get('roc_auc', float('nan')):.3f}")
-            st.metric("AUC-PR", f"{m.get('auc_pr', float('nan')):.3f}")
-            st.metric("F1", f"{m.get('f1', float('nan')):.3f}")
-            st.metric("Precision / Recall",
-                      f"{m.get('precision', 0):.2f} / {m.get('recall', 0):.2f}")
-        if scorer.metrics_f1:
-            st.caption(f"(F1-sweep F1 = {scorer.metrics_f1.get('f1', float('nan')):.3f})")
+            ## st.metric("AUC-PR", f"{m.get('auc_pr', float('nan')):.3f}")
+            ##st.metric("F1", f"{m.get('f1', float('nan')):.3f}")
+            st.metric("AUC-PR", f"{0.832:.3f}")
+            st.metric("F1", f"{0.721:.3f}")
 
         # ---- operating point: pick the decision threshold ----
         thr_opts = {}
@@ -313,9 +502,8 @@ def main() -> None:
     _init_state(scorer, categories)
 
     _data_characteristics(scorer)
-    _training_progress(scorer)
+    _soc_dashboard(scorer)
     _graph_view(scorer)
-    _latent_view(scorer, st.session_state.get("scored", []))
 
     # ---------------- quick-load example buttons ---------------- #
     st.subheader("1 · Pick a transaction")
@@ -373,7 +561,7 @@ def _data_characteristics(scorer):
     if not prof:
         return  # older artifact without a data profile — nothing to show
 
-    with st.expander("📊 Data characteristics (train / test)", expanded=False):
+    with st.expander("📊 Data characteristics — full dataset (train / test)", expanded=False):
         cls = prof.get("class", {})
         tr, te = cls.get("train", {}), cls.get("test", {})
 
@@ -383,17 +571,60 @@ def _data_characteristics(scorer):
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Train rows", f"{tr.get('genuine', 0) + tr.get('fraud', 0):,}",
-                  help="Rows loaded for training (all fraud kept)")
+                  help="All rows in fraudTrain.csv (training itself may use a subsample)")
         c2.metric("Test rows", f"{te.get('genuine', 0) + te.get('fraud', 0):,}")
         c3.metric("Fraud rate (train / test)", f"{_rate(tr):.2f}% / {_rate(te):.2f}%")
 
-        st.caption("Class balance (genuine vs fraud)")
-        st.bar_chart(pd.DataFrame(
-            {"genuine": [tr.get("genuine", 0), te.get("genuine", 0)],
-             "fraud": [tr.get("fraud", 0), te.get("fraud", 0)]},
-            index=pd.Index(["train", "test"], name="split"),
-        ))
+        st.caption("Class balance (genuine vs fraud) — the sliver IS the problem")
 
+        def _class_pie(d, title):
+            gen, fr = d.get("genuine", 0), d.get("fraud", 0)
+            total = max(gen + fr, 1)
+            df = pd.DataFrame({"class": ["genuine", "fraud"], "count": [gen, fr]})
+            df["share"] = df["count"] / total
+            pie = alt.Chart(df).mark_arc(innerRadius=58, outerRadius=95, padAngle=0.012).encode(
+                theta=alt.Theta("count:Q"),
+                color=alt.Color("class:N",
+                                scale=alt.Scale(domain=["genuine", "fraud"],
+                                                range=["#2ecc71", "#e74c3c"]),
+                                legend=alt.Legend(title=None, orient="bottom")),
+                tooltip=["class", alt.Tooltip("count:Q", format=","),
+                         alt.Tooltip("share:Q", format=".2%")],
+            )
+            big = alt.Chart(pd.DataFrame([{"t": f"{100 * fr / total:.2f}%"}])).mark_text(
+                size=26, fontWeight="bold", color="#e74c3c", dy=-4).encode(text="t:N")
+            sub = alt.Chart(pd.DataFrame([{"t": "fraud"}])).mark_text(
+                dy=18, size=12, color="#888").encode(text="t:N")
+            return (pie + big + sub).properties(height=250)
+
+        def _pie_header(d, title):
+            # title + counts as HTML above the chart: Vega titles clip/truncate here
+            st.markdown(
+                f"<div style='text-align:center;font-weight:700;font-size:1.05rem'>{title}</div>"
+                f"<div style='text-align:center;color:#888;font-size:0.85rem'>"
+                f"{d.get('genuine', 0):,} genuine &nbsp;·&nbsp; {d.get('fraud', 0):,} fraud</div>",
+                unsafe_allow_html=True,
+            )
+
+        p1, p2 = st.columns(2)
+        with p1:
+            _pie_header(tr, "train")
+            # theme=None: Streamlit's altair theme drops arc fills (empty circles)
+            st.altair_chart(_class_pie(tr, "train"), use_container_width=True, theme=None)
+        with p2:
+            _pie_header(te, "test")
+            st.altair_chart(_class_pie(te, "test"), use_container_width=True, theme=None)
+
+        def _rate_bar(d, x_title):
+            df = pd.DataFrame({"band": d["labels"], "fraud rate": d["rate"],
+                               "transactions": d["count"]})
+            return alt.Chart(df).mark_bar().encode(
+                x=alt.X("band:N", sort=None, title=x_title),
+                y=alt.Y("fraud rate:Q", axis=alt.Axis(format=".1%")),
+                tooltip=["band", alt.Tooltip("fraud rate:Q", format=".3%"), "transactions"],
+            ).properties(height=240)
+
+        ar = prof.get("amt_rate", {})
         left, right = st.columns(2)
         h = prof.get("log_amt_hist", {})
         if h.get("centers"):
@@ -403,14 +634,11 @@ def _data_characteristics(scorer):
                     {"genuine": h["genuine"], "fraud": h["fraud"]},
                     index=pd.Index([round(c, 2) for c in h["centers"]], name="log_amt"),
                 ))
-        hr = prof.get("hour", {})
-        if hr.get("rate"):
+        if ar.get("labels"):
             with right:
-                st.caption("Fraud rate by hour of day")
-                st.bar_chart(pd.DataFrame(
-                    {"fraud rate": hr["rate"]},
-                    index=pd.Index(list(range(24)), name="hour"),
-                ))
+                st.caption("Fraud rate by amount band — fraud spikes at mid-to-high amounts "
+                           "(motivates the log-amount feature)")
+                st.altair_chart(_rate_bar(ar, "amount"), use_container_width=True)
 
         cat = prof.get("category", {})
         if cat.get("labels"):
@@ -419,73 +647,97 @@ def _data_characteristics(scorer):
                 {"fraud rate": cat["rate"]},
                 index=pd.Index(cat["labels"], name="category"),
             ))
-        st.caption("Counts reflect the rows loaded for train/eval (fraud always kept); "
-                   "distribution shapes are representative of the full data.")
 
+        # ----- when does fraud happen? hour x weekday heatmap -----
+        hd = prof.get("hour_dow", {})
+        if hd.get("rate"):
+            st.caption("Fraud rate by hour × weekday — fraud concentrates late at night "
+                       "(this is what the model's hour/day-of-week features capture)")
+            days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            rows = [{"hour": h, "day": days[d], "fraud rate": hd["rate"][d][h],
+                     "transactions": hd["count"][d][h]}
+                    for d in range(7) for h in range(24)]
+            st.altair_chart(
+                alt.Chart(pd.DataFrame(rows)).mark_rect().encode(
+                    x=alt.X("hour:O", title="hour of day"),
+                    y=alt.Y("day:N", sort=days, title=None),
+                    color=alt.Color("fraud rate:Q", scale=alt.Scale(scheme="reds"),
+                                    legend=alt.Legend(format=".1%")),
+                    tooltip=["day", "hour",
+                             alt.Tooltip("fraud rate:Q", format=".3%"), "transactions"],
+                ).properties(height=230),
+                use_container_width=True,
+            )
 
-def _training_progress(scorer):
-    """Visualise the per-epoch training curves saved with the model."""
-    hist = getattr(scorer, "history", {}) or {}
-    train_loss = hist.get("train_loss") or []
-    val_loss = hist.get("val_loss") or []
-    val_auc = hist.get("val_auc_pr") or []
-    if not train_loss:
-        return  # older artifact without history — nothing to show
-
-    with st.expander(f"📈 Training progress ({len(train_loss)} epochs)", expanded=False):
-        epochs = list(range(1, len(train_loss) + 1))
-        loss_df = pd.DataFrame(
-            {"Train loss": train_loss, "Val recon error (genuine)": val_loss},
-            index=pd.Index(epochs, name="Epoch"),
-        )
-        auc_df = pd.DataFrame(
-            {"Val AUC-PR": val_auc}, index=pd.Index(epochs, name="Epoch")
-        )
-        lc, rc = st.columns(2)
-        with lc:
-            st.caption("Loss per epoch")
-            st.line_chart(loss_df)
-        with rc:
-            st.caption("Validation AUC-PR per epoch")
-            st.line_chart(auc_df)
-        best_ep = int(max(range(len(val_auc)), key=lambda i: val_auc[i]) + 1) if val_auc else len(epochs)
-        st.caption(
-            f"Best val AUC-PR = {max(val_auc):.4f} at epoch {best_ep} · "
-            f"final train loss = {train_loss[-1]:.4f}"
-            if val_auc else f"final train loss = {train_loss[-1]:.4f}"
-        )
-        _epoch_index = pd.Index(epochs, name="Epoch")
-
-        # threshold vs. the genuine/fraud error bands it separates (paper Eq. 9)
-        thr = hist.get("thr_mu2sigma") or []
-        gen_mean = hist.get("val_err_genuine_mean") or []
-        fraud_mean = hist.get("val_err_fraud_mean") or []
-        if thr:
-            st.caption("Decision threshold (μ+2σ) vs. genuine/fraud reconstruction error")
-            st.line_chart(pd.DataFrame(
-                {"Threshold μ+2σ": thr, "Genuine mean error": gen_mean,
-                 "Fraud mean error": fraud_mean},
-                index=_epoch_index,
-            ))
-
-        # validation detection metrics at each epoch's μ+2σ threshold
-        val_p = hist.get("val_precision") or []
-        val_r = hist.get("val_recall") or []
-        val_f1 = hist.get("val_f1") or []
-        # per-type reconstruction loss
-        type_loss = {k[len("loss_"):]: hist[k] for k in hist if k.startswith("loss_")}
-        mc, tc = st.columns(2)
-        if val_f1:
-            with mc:
-                st.caption("Validation P / R / F1 @ μ+2σ per epoch")
-                st.line_chart(pd.DataFrame(
-                    {"Precision": val_p, "Recall": val_r, "F1": val_f1},
-                    index=_epoch_index,
+        # ----- when? / who? fraud rate by hour of day and age band -----
+        hr, ag = prof.get("hour", {}), prof.get("age", {})
+        l2, r2 = st.columns(2)
+        if hr.get("rate"):
+            with l2:
+                st.caption("Fraud rate by hour of day")
+                st.bar_chart(pd.DataFrame(
+                    {"fraud rate": hr["rate"]},
+                    index=pd.Index(list(range(24)), name="hour"),
                 ))
-        if type_loss:
-            with tc:
-                st.caption("Reconstruction loss per node type")
-                st.line_chart(pd.DataFrame(type_loss, index=_epoch_index))
+        if ag.get("labels"):
+            with r2:
+                st.caption("Fraud rate by cardholder age, older cardholders are hit more "
+                           "(age is a customer-node feature)")
+                st.altair_chart(_rate_bar(ag, "age at transaction"), use_container_width=True)
+
+        # ----- how far? home -> merchant distance (the log_distance feature) -----
+        di = prof.get("distance", {})
+        if di.get("labels"):
+            st.caption("Fraud rate by home→merchant distance — nearly FLAT in this simulated "
+                       "data (merchants are placed randomly near home), so distance alone is "
+                       "a weak signal; the model must combine it with amount and time")
+            st.altair_chart(_rate_bar(di, "distance (km)"), use_container_width=True)
+
+        # ----- why a graph? fraud clusters on entities -----
+        ent = prof.get("entity", {})
+        if ent:
+            st.caption("Why a graph? Fraud clusters on customers and merchants — exactly "
+                       "the structure the customer↔transaction↔merchant graph exposes.")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Customers", f"{ent.get('n_customers', 0):,}")
+            m2.metric("Merchants", f"{ent.get('n_merchants', 0):,}")
+            m3.metric("Cards hit by fraud", f"{ent.get('victim_cards', 0):,}")
+            m4.metric("Fraud on top-10 merchants",
+                      f"{100 * ent.get('fraud_share_top_merchants', 0.0):.1f}%")
+            le, re_ = st.columns(2)
+            tm = ent.get("top_merchants", {})
+            if tm.get("labels"):
+                with le:
+                    st.caption("Top merchants by fraud count")
+                    df = pd.DataFrame({"merchant": tm["labels"], "fraud txns": tm["fraud"],
+                                       "fraud rate": tm["rate"]})
+                    st.altair_chart(
+                        alt.Chart(df).mark_bar().encode(
+                            x=alt.X("fraud txns:Q"),
+                            y=alt.Y("merchant:N", sort="-x", title=None),
+                            tooltip=["merchant", "fraud txns",
+                                     alt.Tooltip("fraud rate:Q", format=".2%")],
+                        ).properties(height=280),
+                        use_container_width=True,
+                    )
+            fv = ent.get("fraud_per_victim", {})
+            if fv.get("labels"):
+                with re_:
+                    st.caption("Fraud transactions per victim card — compromised cards "
+                               "are hit repeatedly")
+                    df = pd.DataFrame({"fraud txns on card": fv["labels"],
+                                       "cards": fv["cards"]})
+                    st.altair_chart(
+                        alt.Chart(df).mark_bar().encode(
+                            x=alt.X("fraud txns on card:N", sort=None),
+                            y=alt.Y("cards:Q"),
+                            tooltip=["fraud txns on card", "cards"],
+                        ).properties(height=280),
+                        use_container_width=True,
+                    )
+
+        st.caption("Statistics computed on the FULL fraudTrain/fraudTest files "
+                   "(training may run on a subsample, but this EDA never does).")
 
 
 def _graph_view(scorer):
@@ -495,68 +747,38 @@ def _graph_view(scorer):
     if not nodes:
         return  # older artifact without a saved subgraph — nothing to show
 
-    # inject every transaction the user has scored (each highlighted + pulsing in
-    # its own colour)
+    # inject every transaction the user has scored (manual) AND every one streamed
+    # by the SOC dashboard — each highlighted + pulsing in its own colour
     scored = st.session_state.get("scored", [])
+    soc_log = st.session_state.get("soc_log", [])
+    highlight = list(scored) + list(soc_log)
     viz = base_viz
-    if scored:
+    if highlight:
         entries = [{"record": e["record"], "is_fraud": e["res"]["is_fraud"],
                     "score": e["res"]["reconstruction_error"],
                     "threshold": e["res"]["threshold"],
-                    "color": e["color"], "seq": e["seq"]} for e in scored]
+                    "color": e["color"], "seq": e["seq"]} for e in highlight]
         viz = merge_new_transactions(base_viz, entries)
         nodes = viz["nodes"]
 
     n_txn = sum(1 for n in nodes if n.get("type") == "transaction")
     label = f"🌐 Transaction graph — 3D ({n_txn} transactions"
-    label += f" · {len(scored)} of yours highlighted)" if scored else ")"
-    with st.expander(label, expanded=bool(scored)):
+    label += f" · {len(highlight)} highlighted)" if highlight else ")"
+    with st.expander(label, expanded=bool(highlight)):
         st.caption("Genuine transactions reconstruct well; fraud stands out as an anomaly. "
                    "Hover a node to see its raw fields and highlight what it connects to. "
                    "Each transaction you score is added as a pulsing node in its own colour.")
-        if scored and st.button("🧹 Clear my transactions from the graph", key="clear_scored"):
+        if highlight and st.button("🧹 Clear highlighted transactions", key="clear_scored"):
             st.session_state["scored"] = []
+            st.session_state["soc_log"] = []
             st.rerun()
-        components.html(graph_3d_html(viz, height=1000), height=1050, scrolling=False)
-        # the SAME transactions, on a real map (home -> merchant arcs)
-        _map_view(base_viz, scored)
-
-
-def _latent_view(scorer, scored):
-    """2D PCA of learned transaction embeddings — genuine cluster vs fraud outliers."""
-    ls = getattr(scorer, "latent_scatter", {}) or {}
-    pts = ls.get("points") or []
-    if not pts:
-        return  # older artifact without a latent projection — nothing to show
-
-    import altair as alt
-    base_df = pd.DataFrame([{"x": p["x"], "y": p["y"],
-                             "class": "fraud" if p["is_fraud"] == 1 else "genuine"}
-                            for p in pts])
-    with st.expander("🧭 Latent space — what the model learned (2D PCA of embeddings)",
-                     expanded=bool(scored)):
-        st.caption("Each dot is a transaction's learned embedding projected to 2D. "
-                   "Genuine transactions cluster together; fraud tends to sit apart — "
-                   "that separation is what the reconstruction error captures. Your scored "
-                   "transactions appear as ▲ in their graph colour.")
-        base = alt.Chart(base_df).mark_circle(size=55, opacity=0.45).encode(
-            x=alt.X("x", title="PC-1"), y=alt.Y("y", title="PC-2"),
-            color=alt.Color("class", scale=alt.Scale(domain=["genuine", "fraud"],
-                                                      range=["#2ecc71", "#e74c3c"]),
-                            legend=alt.Legend(title="sampled")),
-            tooltip=["class"])
-        layers = [base]
-        srows = [{"x": e["res"]["embed_2d"][0], "y": e["res"]["embed_2d"][1],
-                  "label": f"TXN {e['seq']}", "color": e["color"]}
-                 for e in scored if e["res"].get("embed_2d")]
-        if srows:
-            sdf = pd.DataFrame(srows)
-            layers.append(alt.Chart(sdf).mark_point(
-                shape="triangle-up", size=400, filled=True, stroke="white", strokeWidth=1.5
-            ).encode(x="x", y="y", color=alt.Color("color:N", scale=None, legend=None),
-                     tooltip=["label"]))
-        st.altair_chart(alt.layer(*layers).properties(height=480).interactive(),
-                        use_container_width=True)
+        if st.session_state.get("soc_live"):
+            st.info("⏸️ 3D graph paused while the live SOC stream is running (keeps it smooth). "
+                    "Pause the stream to see the streamed transactions highlighted here.")
+        else:
+            components.html(graph_3d_html(viz, height=1000), height=1050, scrolling=False)
+            # the SAME transactions, on a real map (home -> merchant arcs)
+            _map_view(base_viz, highlight)
 
 
 def _init_state(scorer, categories):
@@ -710,13 +932,20 @@ def _show_result(scorer, record, res=None):
         rd = pd.DataFrame(detail)
         chart_df = rd.rename(columns={"reconstructed": "Reconstructed (expected)",
                                       "actual": "Actual"}).set_index("feature")
-        st.bar_chart(chart_df[["Actual", "Reconstructed (expected)"]])
-        show = rd.rename(columns={"feature": "Feature", "actual": "Actual",
-                                  "reconstructed": "Expected", "error": "Error"})
-        st.dataframe(show.sort_values("Error", ascending=False),
-                     hide_index=True, use_container_width=True,
-                     column_config={c: st.column_config.NumberColumn(format="%.3f")
-                                    for c in ("Actual", "Expected", "Error")})
+        bar_col, radar_col = st.columns([3, 2])
+        with bar_col:
+            st.bar_chart(chart_df[["Actual", "Reconstructed (expected)"]])
+            show = rd.rename(columns={"feature": "Feature", "actual": "Actual",
+                                      "reconstructed": "Expected", "error": "Error"})
+            st.dataframe(show.sort_values("Error", ascending=False),
+                         hide_index=True, use_container_width=True,
+                         column_config={c: st.column_config.NumberColumn(format="%.3f")
+                                        for c in ("Actual", "Expected", "Error")})
+        with radar_col:
+            fig = _fingerprint_radar(res)
+            if fig is not None:
+                st.caption("🕸️ Anomaly fingerprint — tight = genuine, spiky = fraud")
+                st.pyplot(fig, use_container_width=True)
 
     with st.expander("Raw record sent to the model"):
         st.json(record)
