@@ -41,7 +41,8 @@ needed to demo.**
 
 ```
 code/
-├─ data/                  # put fraudTrain.csv / fraudTest.csv here (see data/README.md)
+├─ data/                  # put fraudTrain.csv / fraudTest.csv here (gitignored)
+├─ docs/                  # implementation & preprocessing notes
 ├─ src/
 │  ├─ config.py           # all hyper-parameters (paper Table 3)
 │  ├─ data_prep.py        # per-type featurizers + hetero-graph construction
@@ -50,10 +51,12 @@ code/
 │  ├─ train.py            # train-once pipeline, saves artifacts + plots
 │  ├─ evaluate.py         # μ+2σ and F1-sweep thresholds, metrics, Figure-5 plots
 │  ├─ scorer.py           # FraudScorer: real-time single-transaction scoring
+│  ├─ graph_viz.py        # self-contained 3D force-graph HTML for the demo
 │  └─ utils.py            # seeding + device selection
-├─ tests/                 # pytest suite (17 tests)
+├─ tests/                 # pytest suite (33 tests)
 ├─ main.py                # `python main.py` → train
 ├─ app.py                 # `python -m streamlit run app.py` → demo
+├─ outputs/               # artifacts + metrics + plots (created by training, gitignored)
 └─ requirements.txt
 ```
 
@@ -74,10 +77,10 @@ automatically when available.
 
 ## How to run — quick start
 
-First get the dataset (one time): download the Kaggle
-`kartik2112/fraud-detection` dataset and place `fraudTrain.csv` and
-`fraudTest.csv` in `data/` (or `archive/`) — see [`data/README.md`](data/README.md).
-Then:
+First get the dataset (one time): download the
+[Kaggle `kartik2112/fraud-detection` dataset](https://www.kaggle.com/datasets/kartik2112/fraud-detection)
+and place `fraudTrain.csv` (~350 MB) and `fraudTest.csv` (~150 MB) in `data/`
+(or `archive/`). Both locations are gitignored — never commit the CSVs. Then:
 
 ```bash
 python main.py --epochs 40 --train-size 50000   # train, evaluate, save artifacts + plots
@@ -110,11 +113,18 @@ CLI flags (see `main.py`):
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--epochs N` | 150 | training epochs (early-stops on val AUC-PR) |
-| `--train-size N` | 120000 | rows drawn from the real train file (all fraud always kept) |
-| `--test-size N` | full | rows drawn from the real test file (omit = full test set) |
+| `--train-size N` | 200000 | rows drawn from the real train file (all fraud always kept) |
+| `--test-size N` | 100000 | rows drawn from the real test file |
 | `--full` | off | use the entire real dataset (ignores `--train-size`/`--test-size`) |
 | `--device` | auto | `auto` \| `cpu` \| `cuda` |
 | `--seed N` | 42 | random seed |
+
+There are also **opt-in training tricks** — all *off* by default so the default
+run stays paper-faithful: `--small-train` (a preset for limited hardware: 2
+layers, dropout 0.15, denoising, LR scheduler, gradient clipping, LayerNorm, 60k
+train rows), plus the individual knobs `--encoder-layers`, `--dropout`,
+`--denoise-std`, `--grad-clip`, `--scheduler`/`--no-scheduler`, and
+`--layernorm`/`--no-layernorm`.
 
 `--train-size`/`--test-size` are always sampled from the **real** dataset; all
 fraud rows are kept (the auto-encoder trains on genuine rows, and fraud is used
@@ -128,10 +138,11 @@ heads, dropout 0.4, weight-decay 0.01, etc.) live in
 
 ## How to test
 
-The `tests/` directory holds a pytest suite (17 tests) covering the featurizers,
+The `tests/` directory holds a pytest suite (33 tests) covering the featurizers,
 graph construction, the custom attention layer (attention-sums-to-1 across heads,
 uniform-sum aggregation), the model/loss (no-KL, MSE+CE), the μ+2σ threshold, an
-in-memory training smoke test, and the scorer (load + cold-start).
+in-memory training smoke test, the scorer (load + cold-start), and the 3D graph
+visualization helpers.
 
 ```bash
 python -m pytest                       # run the whole suite (from the repo root)
@@ -164,13 +175,22 @@ Windows). If the app shows *"No trained model found at outputs/artifacts.pt"*, r
 
 ### What's in it
 
-**Sidebar — model card:** ROC-AUC / AUC-PR / F1 / Precision / Recall on the full
-test set at the μ+2σ threshold (plus the F1-sweep F1 for comparison), the decision
+**Sidebar — model card:** ROC-AUC / AUC-PR / F1 / Precision / Recall on the test
+set at the μ+2σ threshold (plus the F1-sweep F1 for comparison), the decision
 threshold, and how many known customers/merchants have stored profiles.
 
-**📈 Training progress (expander):** per-epoch line charts of training loss,
-validation reconstruction error, and validation AUC-PR — read from the `history`
-saved in the artifact — with a "best val AUC-PR at epoch N" caption.
+**🛰️ Live fraud monitoring (expander):** a SOC-style live stream that replays
+test transactions through the scorer — verdict feed, running fraud-rate metrics,
+and a geographic arc map (cardholder home → merchant) with an optional
+fraud-density heatmap.
+
+**📊 Data characteristics (expander):** class-balance pies for train/test and
+fraud-rate breakdowns by amount, category, hour, age, and cardholder–merchant
+distance.
+
+**🌐 Transaction graph — 3D (expander):** an interactive 3D force-graph of a
+sampled customer ↔ transaction ↔ merchant subgraph; transactions you score in
+the demo are injected as new nodes.
 
 **1 · Pick a transaction:**
 
@@ -183,9 +203,10 @@ saved in the artifact — with a "best val AUC-PR at epoch N" caption.
 
 **2 · Score it:** the **🔎 Check transaction** button runs the model and shows the
 verdict (✅ NON-FRAUD / 🚨 FRAUD), the reconstruction error vs. threshold and their
-ratio, an anomaly-level bar (1.0 = at threshold), known/cold-start tags, and a
-**top contributing features** table + bar chart explaining *why* it scored that way
-(plus the raw record in an expander).
+ratio, an anomaly-level bar (1.0 = at threshold), known/cold-start tags, a
+**top contributing features** table explaining *why* it scored that way, and an
+**anomaly fingerprint** radar (tight = genuine, spiky = fraud) — plus the raw
+record in an expander.
 
 **Try this:** load a random genuine transaction (scores ✅), then push the amount
 up, set the hour to 3 AM, or switch to a brand-new customer/merchant, and re-score
@@ -214,13 +235,19 @@ remedy and is what a performance-tuned variant would do.
 
 ## Deviations from the paper
 
-Only **two**, both because the paper is unrunnable as literally written (each is
-documented in [`src/config.py`](src/config.py)):
+Each is documented in [`src/config.py`](src/config.py). Two are forced (the
+paper is unrunnable as literally written):
 
 * **Encoder depth.** Table 3 lists "encoder layers = 124"; 124 message-passing
   layers oversmooth catastrophically, so `encoder_layers` defaults to **2**.
 * **Reparameterization.** The literal formula takes `log()` of raw activations
   (produces NaNs), so a standard `μ`/`logvar` parameterization is used instead.
 
+One is a minor resource concession:
+
+* **Decoder width.** Table 3's decoder hidden size of 64 is halved to
+  `decoder_hidden = 32`.
+
 Everything else matches Table 3: 16 heads, dropout 0.4, regularization 0.01, **no
-KL term**, and **no latent bottleneck** (latent dim = hidden = 64).
+KL term**, and **no latent bottleneck** (latent dim = hidden = 64). The opt-in
+training tricks (`--small-train` etc.) are all **off** by default.

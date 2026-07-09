@@ -29,7 +29,7 @@ def parse_args() -> Config:
                     help="number of rows to draw from the real train file (all fraud kept); "
                          "omit for the config default")
     ap.add_argument("--test-size", type=int, default=None,
-                    help="number of rows to draw from the real test file; omit for the full test set")
+                    help="number of rows to draw from the real test file; omit for the config default")
     ap.add_argument("--full", action="store_true",
                     help="use the entire real dataset (ignore --train-size/--test-size)")
     ap.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")

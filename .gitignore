@@ -1,12 +1,13 @@
-# Du lieu lon (KHONG day len GitHub: >100MB/file)
-# archive/ = fraudTrain.csv (~350MB) + fraudTest.csv (~150MB) tu Kaggle
+# Large data (do NOT push to GitHub: >100MB/file)
+# archive/ = fraudTrain.csv (~350MB) + fraudTest.csv (~150MB) from Kaggle
 archive/
 data/*.csv
 
-# Ket qua sinh ra (train lai la co)
-outputs/
+# Assistant tooling
+.superpowers/
+.claude/
 
-# Moi truong ao & cache Python
+# Python virtual environments & caches
 .venv/
 venv/
 env/
@@ -16,20 +17,14 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 
-# Model / du lieu nhi phan le
-*.pt
-*.pth
-*.ckpt
-
-# Bao cao LaTeX (giu rieng / Overleaf)
+# LaTeX report (kept separately / Overleaf)
 Seminar_1/
 
-# IDE / he dieu hanh
+# IDE / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 *.log
 
-# Van giu huong dan tai du lieu
-!data/README.md
+docs/

@@ -15,7 +15,7 @@ python -m streamlit run app.py  # interactive single-transaction demo
 ```
 
 - **Real data required** (no synthetic fallback): drop Kaggle `fraudTrain.csv`/`fraudTest.csv` into `data/` (or `archive/`); training aborts with a clear error if absent.
-- Train/test sizes are drawn from the real data via `--train-size N` / `--test-size N` (omit `--test-size` for the full test set); `--full` uses the entire dataset; `--device cpu|cuda|auto`.
+- Train/test sizes are drawn from the real data via `--train-size N` / `--test-size N` (defaults 200k/100k from `src/config.py`); `--full` uses the entire dataset; `--device cpu|cuda|auto`.
 
 ## Architecture
 
@@ -55,12 +55,18 @@ Encoder uses the custom `HGAEConv` in `src/hgae_conv.py` implementing the paper'
 - **Threshold = μ+2σ** on held-out genuine reconstruction errors (paper Eq. 9);
   the F1-sweep operating point is also computed and logged for comparison.
 
-## Deviations from the paper (the only two — both forced)
+## Deviations from the paper
+
+Two forced deviations (the paper is unrunnable as written):
 
 - Table 3's "124 encoder layers" → `encoder_layers=2` (124 oversmooths
   catastrophically; embeddings collapse).
 - The literal reparameterization `mean(h)+ε·exp(½·log(h))` takes `log()` of raw
   activations (NaN) → standard `mu`/`logvar` heads instead.
+
+One resource concession: `decoder_hidden=32` (Table 3 says 64). The opt-in
+training tricks in `main.py` (`--small-train`, denoising, scheduler, LayerNorm)
+are all OFF by default, so the default run stays paper-faithful.
 
 Everything else matches Table 3: heads=16, dropout=0.4, regularization
 (weight_decay)=0.01, no KL, no latent bottleneck (latent=hidden=64).
